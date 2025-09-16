@@ -29,6 +29,10 @@ app.use(cors({
   },
 }));
 
+app.get('/health', (_req, res) => {
+  res.status(200).json({ ok: true, uptime: process.uptime() });
+});
+
 // -------------------- 라우트 마운트 --------------------
 app.use('/api', api); // 모든 /api/* 요청을 src/api.js로 위임
 
