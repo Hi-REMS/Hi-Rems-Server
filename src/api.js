@@ -26,7 +26,7 @@ const exportMonthCsvRoutes    = require('./routes/export.monthCsv');            
 
 // -------------------- 라우터 마운트 --------------------
 // 최상위
-router.use('/', healthRoutes);
+router.use('/health', healthRoutes);
 router.use('/', dbTestRoutes);
 
 // 공용 엔드포인트
