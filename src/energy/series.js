@@ -5,6 +5,7 @@
 // - ?multi=00|01|02|03 지정 시 해당 설비만, 미지정/['', 'all']이면 전체 합계
 // - range=weekly/monthly/yearly + detail=hourly 지원
 // - 응답: { deviceInfo, params, bucket, range_utc, series, detail_hourly, summary }
+// - 각 버킷 마다 Co2 저감량, kWh, 식수 그루, firstAt / lastAt
 
 const express = require('express');
 const router = express.Router();
