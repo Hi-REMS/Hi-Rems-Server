@@ -1,4 +1,23 @@
 // src/routes/weather.vilageFcst.byPoint.js
+
+/*
+  기상청 동네예보(단기예보)용 좌표 변환 API 라우트
+ - 위경도(lat, lon) → 기상청 DFS 격자(nx, ny) 변환
+   ▸ DFS(단기예보 격자) 공식은 기상청 제공 샘플을 그대로 사용
+   ▸ 변환 결과 nx, ny는 기상청 "단기예보 조회 API" 호출 시 사용
+
+ - 엔드포인트: GET /api/weather/vilageFcst/by-point
+   ▸ 쿼리: lat, lon (위도, 경도; 한국 내 범위만 허용)
+   ▸ 응답: { ok, query: {lat,lon}, grid: {nx,ny}, hourly: [] }
+   ▸ hourly 필드는 후속 API 연동(예보 데이터) 시 확장 가능
+
+ - 기능:
+   ▸ lat/lon 유효성 검사 (숫자 여부, 한국 영역(31~39N, 123~134E))
+   ▸ 변환 실패/범위 벗어나면 400 에러 반환
+   ▸ 성공 시 JSON 반환 (grid 좌표 포함)
+*/
+
+
 const express = require('express');
 const router = express.Router();
 

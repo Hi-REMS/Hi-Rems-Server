@@ -1,4 +1,56 @@
 // src/routes/weather.vilageFcst.js
+
+/*
+기상청 동네예보(단기예보) 프록시 + IMEI→주소→좌표→격자→예보 파이프라인 API
+
+ 주요 기능
+ 1) IMEI로 최근 CID 조회(Postgres) → CID로 최신 주소 조회(MySQL)
+ 2) 주소를 지오코딩해 위경도(lat, lon) 획득 (Kakao 1순위 → Naver → vWorld 폴백)
+ 3) 위경도를 기상청 DFS 격자(nx, ny)로 변환(dfs_xy_conv)
+ 4) 기상청 “동네예보(버전 2.0)” API 호출, 시간대별 예보를 추려서(hourly[]) 반환
+ 5) 성능/안정성:
+    - LRU 캐시 (IMEI→CID, CID→주소, 주소→좌표, KMA 호출 결과 등)
+    - in-flight 결합(동일 키 동시요청 병합)으로 중복 외부호출 방지
+    - 발표 시각 slot(02/05/08/11/14/17/20/23시) 계산 및 이전 slot 자동 폴백
+    - 타임박스(FAST_BUDGET_MS) 내 신선 데이터 실패 시 스냅샷(stale) 즉시 응답
+
+ 엔드포인트
+ - GET /api/weather/vilageFcst/by-imei
+   ▸ 쿼리: imei=... [필수], (선택) address=..., lat=..., lon=...
+     - address: 주소를 강제로 지정(디버그/오버라이드용)
+     - lat/lon : 좌표를 강제로 지정(지오코딩 건너뜀)
+   ▸ 응답 예시:
+     {
+       imei, cid, address, nx, ny,
+       base_date, base_time,            // KMA 호출 기준일시
+       hourly: [ { hour:"HH:00", TA, SKY, PTY }, ... ],
+       stale: true|undefined,           // 스냅샷 사용 여부(빠른 응답)
+       debug: { geo:{lat,lon,source}, geocode:{...}, tried:[...slot시도로그] }
+     }
+
+ 외부 의존/환경변수
+ - Postgres: public.log_remssendlog (IMEI→CID)
+ - MySQL   : alliothub.rems_rems     (CID→address)
+ - 기상청: https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst
+   ▸ KMA_VILAGE_KEY  : (필수) 서비스키 (퍼센트인코딩/평문 모두 허용, 중복 인코딩 방지 처리)
+ - Kakao  : KAKAO_REST_KEY (지오코딩 1순위)
+ - Naver  : NAVER_CLIENT_ID, NAVER_CLIENT_SECRET (옵션 폴백)
+ - vWorld : VWORLD_API_KEY (옵션 폴백)
+
+ 캐시 TTL (대략)
+ - IMEI→CID: 5분, CID→주소: 10분, 주소→좌표: 1시간
+ - IMEI 메타(주소/좌표/격자): 24시간
+ - KMA(슬롯기반): 다음 발표 시각까지(최대 3시간 내), 그리드별 최신스냅샷: 6시간
+ - 최종 응답(동일 imei/address/좌표): 약 90초
+
+ 에러/특이사항
+ - IMEI에 대한 CID가 없으면 found:false 반환
+ - KMA 응답 200이지만 빈 items일 수 있어 이전 slot 자동 재시도
+ - 타임박스 초과 시 stale 스냅샷으로 우선 응답 후, 캐시는 신선 데이터로 갱신됨
+*/
+
+
+
 const express = require('express');
 const router = express.Router();
 

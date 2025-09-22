@@ -1,4 +1,19 @@
 // src/routes/weather.asosDaily.js
+
+/*
+ 기상청 ASOS(지상관측) 일자료 조회 API 라우트
+ - 외부 공공데이터포털 기상청 API (AsosDalyInfoService/getWthrDataList) 호출
+ - .env의 KMA_ASOS_KEY, KMA_ASOS_ENDPOINT, KMA_ASOS_FALLBACK_STNID 사용
+ - 내부 엔드포인트: GET /api/weather/asos/daily
+   ▸ 파라미터: stnId(관측소ID, 기본=서울 108), start=YYYYMMDD, end=YYYYMMDD
+   ▸ 선택: pageNo(기본 1), numOfRows(기본 365), debug=1
+ - 반환: { stnId, startDt, endDt, count, items[] }
+ - 기능:
+   ▸ 환경변수 serviceKey(기상청 API 키)를 안전히 처리 (인코딩/디코딩 자동 감지)
+   ▸ debug=1 옵션으로 fullUrl, header, 응답 일부 스니펫 확인 가능
+   ▸ 에러 처리: 잘못된 날짜, HTTP 오류, JSON 아님(XML), resultCode≠00 등
+*/
+
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -42,7 +57,7 @@ router.get('/daily', async (req, res, next) => {
     const serviceKey = normalizeMaybeEncoded(process.env.KMA_ASOS_KEY || '');
 
     const params = {
-      serviceKey,          // 🔑 평문키. 아래 paramsSerializer로 인코딩을 통제
+      serviceKey,          // 평문키. 아래 paramsSerializer로 인코딩을 통제
       dataType: 'JSON',
       dataCd: 'ASOS',
       dateCd: 'DAY',
