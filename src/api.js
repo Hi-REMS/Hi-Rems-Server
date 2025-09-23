@@ -8,21 +8,14 @@ const ordersRoutes     = require('./routes/orders');
 const logsRoutes       = require('./routes/logs');
 const dashboardRoutes  = require('./routes/dashboard');
 const remsRoutes       = require('./routes/rems');
-
-// -------------------- 테스트 --------------------
 const dbTestRoutes     = require('./db/db.routes.test');
-
-// -------------------- 에너지 --------------------
 const energyRoutes        = require('./energy/service');
 const energySeriesRoutes  = require('./energy/series');
+const vilageFcstRoutes        = require('./routes/weather.vilageFcst');
+const vilageFcstByPointRoutes = require('./routes/weather.vilageFcst.byPoint');
+const asosDailyRoutes         = require('./routes/weather.asosDaily');
 
-// ✅ 날씨/기상
-const vilageFcstRoutes        = require('./routes/weather.vilageFcst');         // 단기예보(격자, 기존)
-const vilageFcstByPointRoutes = require('./routes/weather.vilageFcst.byPoint'); // ✅ 새로 추가된 by-point
-const asosDailyRoutes         = require('./routes/weather.asosDaily');          // ASOS 일자료
-
-// ✅ 익스포트
-const exportMonthCsvRoutes    = require('./routes/export.monthCsv');            // 월별 CSV 다운로드
+const exportMonthCsvRoutes    = require('./routes/export.monthCsv');
 
 // -------------------- 라우터 마운트 --------------------
 // 최상위
@@ -37,7 +30,7 @@ router.use('/rems',        remsRoutes);
 
 // 날씨
 router.use('/weather/vilageFcst', vilageFcstRoutes);
-router.use('/weather/vilageFcst', vilageFcstByPointRoutes); // ✅ /by-point
+router.use('/weather/vilageFcst', vilageFcstByPointRoutes);
 router.use('/weather/asos',       asosDailyRoutes);
 
 // 에너지

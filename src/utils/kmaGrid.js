@@ -1,4 +1,19 @@
 // src/utils/kmaGrid.js
+
+
+/*
+ 기상청 단기예보(VilageFcst) API에서 사용하는 DFS 격자 좌표 변환 유틸
+ - 위경도(lat, lon) → DFS 격자(nx, ny) 로 변환 (toXY 모드)
+ - 기상청 공식 변환 수식(5km 격자망, 기준점: 위도 38°, 경도 126°)
+ - 사용 예시:
+     const { dfs_xy_conv } = require('./kmaGrid');
+     const grid = dfs_xy_conv('toXY', 37.5665, 126.9780); // 서울
+     → { nx: 60, ny: 127 }  (기상청 API 호출 시 nx,ny 파라미터에 사용)
+
+현재는 'toXY' 변환만 지원 (위경도 → 격자)
+*/
+
+
 function dfs_xy_conv(code, v1, v2) {
   const RE = 6371.00877; // 지구 반경(km)
   const GRID = 5.0;      // 격자 간격(km)
