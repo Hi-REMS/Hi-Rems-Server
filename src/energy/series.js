@@ -9,6 +9,7 @@
 
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const { pool } = require('../db/db.pg');
 const { parseFrame } = require('./parser');
 const { TZ, getRangeUtc, bucketKeyKST, whDeltaToKwh } = require('./timeutil');
@@ -19,6 +20,15 @@ const round2 = v => Math.round(v * 100) / 100;
 
 const isImeiLike = s => typeof s === 'string' && s.length >= 8;
 const ONLY_OK = `AND split_part(body,' ',5) = '00'`;
+
+// ★ 이 엔드포인트 전용 레이트 리미터 (1분에 최대 10회)
+const seriesLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1분
+  max: 10,
+  message: { error: 'Too many requests — try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // 헤더 파트 파싱
 function headerFromHex(hex) {
@@ -74,7 +84,8 @@ function kstEndExclusiveUtc({ y, M, d }) {
   return new Date(Date.UTC(y, M - 1, d + 1, -9, 0, 0, 0));
 }
 
-router.get('/series', async (req, res, next) => {
+// ★ seriesLimiter를 미들웨어로 추가
+router.get('/series', seriesLimiter, async (req, res, next) => {
   try {
     // ===== 파라미터 =====
     const imei = req.query.rtuImei || req.query.imei;
@@ -177,12 +188,12 @@ router.get('/series', async (req, res, next) => {
       };
     });
 
-    // 총합(반올림 편차 방지: 총kWh → 한번만 변환)
+    // 총합
     const total_kwh = round2(series.reduce((s,x)=>s + (x.kwh||0), 0));
     const total_co2_kg = round2(total_kwh * CO2_FACTOR);
     const total_trees  = Math.round(total_co2_kg / TREE_KG);
 
-    // ===== 시간대 상세 (가장 최근 일자, 멀티 합산) =====
+    // ===== 시간대 상세 =====
     let detail_hourly = null;
     if (wantHourly && rows.length) {
       const lastRowTime = rows[rows.length - 1].time;
@@ -231,7 +242,7 @@ router.get('/series', async (req, res, next) => {
         multi: wantMulti || 'all',
         detail: wantHourly ? 'hourly' : undefined
       },
-      bucket,                  // 'day' | 'month'
+      bucket,                  
       range_utc: { start: startUtc, end: endUtc },
       series,
       detail_hourly,
