@@ -1,12 +1,32 @@
 // src/energy/service.js
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit'); // ★ 추가
 const { pool } = require('../db/db.pg');
 const { parseFrame } = require('./parser');
 const { TZ } = require('./timeutil');
 
 const EMISSION_FACTOR = Number(process.env.EMISSION_FACTOR_KG_PER_KWH || 0.4747);
 const TREE_CO2_KG = 6.6;
+
+// --------------------------------------------------
+// Rate limiters (라우트별 성격에 맞게 다른 한도)
+// --------------------------------------------------
+const makeLimiter = (maxPerMin) =>
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: maxPerMin,
+    message: { error: 'Too many requests — try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+const limiterKPI       = makeLimiter(15); // /electric (여러 쿼리)
+const limiterPreview   = makeLimiter(30); // /electric/preview
+const limiterDebug     = makeLimiter(10); // /electric/debug (비용 큼)
+const limiterInstant   = makeLimiter(30); // /electric/instant (단일 조회)
+const limiterInstantM  = makeLimiter(30); // /electric/instant/multi
+const limiterHourly    = makeLimiter(10); // /electric/hourly (시간대별 반복 조회)
 
 // BigInt 안전 직렬화
 const jsonSafe = (obj) =>
@@ -83,7 +103,6 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
 }
 
 /* ---------- SQL helpers (멀티별) ---------- */
-/** 멀티별 최신 정상 프레임 */
 async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   const params = [imei];
   let idx = 2;
@@ -130,7 +149,6 @@ async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   return rows.map(r => ({ multi_hex: r.multi_hex, time: r.time || null, body: r.body || null }));
 }
 
-/** 특정 시각 이후 멀티별 첫 정상 프레임 (금일 0시/월초 계산용) */
 async function firstAfterPerMulti(imei, tsUtc, { energyHex=null, typeHex=null } = {}) {
   const params = [imei, tsUtc];
   let idx = 3;
@@ -222,7 +240,7 @@ function biToNumber(bi) { if (typeof bi !== 'bigint') return null; return Number
 /* ---------- endpoints ---------- */
 
 // KPI 요약 (멀티 합산)
-router.get('/electric', async (req, res, next) => {
+router.get('/electric', limiterKPI, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     if (!isImeiLike(imei)) { const e = new Error('rtuImei(또는 imei) 파라미터가 필요합니다.'); e.status = 400; throw e; }
@@ -345,7 +363,7 @@ router.get('/electric', async (req, res, next) => {
 });
 
 // 프리뷰 (최근 프레임 시계열)  ★ multi 필터 추가
-router.get('/electric/preview', async (req, res, next) => {
+router.get('/electric/preview', limiterPreview, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     let limit = Math.min(parseInt(req.query.limit || '200', 10), 2000);
@@ -394,7 +412,7 @@ router.get('/electric/preview', async (req, res, next) => {
 });
 
 // 디버그 (원본+파싱상태)
-router.get('/electric/debug', async (req, res, next) => {
+router.get('/electric/debug', limiterDebug, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     const limit = Math.min(parseInt(req.query.limit || '5', 10), 50);
@@ -444,7 +462,7 @@ router.get('/electric/debug', async (req, res, next) => {
 });
 
 // 최신 프레임 즉시 조회 (옵션: multi)
-router.get('/electric/instant', async (req, res, next) => {
+router.get('/electric/instant', limiterInstant, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     if (!isImeiLike(imei)) { const e = new Error('rtuImei(또는 imei) 파라미터가 필요합니다.'); e.status = 400; throw e; }
@@ -501,7 +519,7 @@ router.get('/electric/instant', async (req, res, next) => {
 });
 
 // 멀티(설비 슬롯)별 최신값 + 합계/평균
-router.get('/electric/instant/multi', async (req, res, next) => {
+router.get('/electric/instant/multi', limiterInstantM, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     if (!isImeiLike(imei)) { const e = new Error('rtuImei(또는 imei) 파라미터가 필요합니다.'); e.status = 400; throw e; }
@@ -566,7 +584,7 @@ router.get('/electric/instant/multi', async (req, res, next) => {
 const { DateTime } = require('luxon');
 
 // 시간대별 발전량 (kWh)
-router.get('/electric/hourly', async (req, res, next) => {
+router.get('/electric/hourly', limiterHourly, async (req, res, next) => { // ★ limiter 추가
   try {
     const imei = req.query.rtuImei || req.query.imei;
     if (!isImeiLike(imei)) {
@@ -618,6 +636,5 @@ router.get('/electric/hourly', async (req, res, next) => {
     res.json({ date: baseKST.toFormat('yyyy-LL-dd'), imei, energy:energyHex, type:typeHex, hours:results });
   } catch (e) { next(e); }
 });
-
 
 module.exports = router;
