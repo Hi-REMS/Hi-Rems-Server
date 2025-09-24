@@ -1,0 +1,45 @@
+name: CodeQL (JS/TS)
+
+on:
+  push:
+    branches: [ main ]           # 필요 시 develop 등 추가
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: "0 3 * * 1"          # 매주 월요일 12:00 KST
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write      # Security 탭에 결과 업로드 권한
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # (선택) JS/TS 프로젝트면 의존성 설치를 먼저 해두는 게 정확도 ↑
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps (optional but recommended)
+        run: |
+          if [ -f package-lock.json ]; then npm ci; fi
+          # TS를 빌드하는 프로젝트면: npm run build || true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript   # JS/TS 분석
+          # queries: security-extended       # (선택) 더 엄격한 규칙 세트
+
+      # JS/TS는 보통 별도 빌드 없이도 가능하지만,
+      # monorepo/TS 트랜스파일 등 빌드가 필요하면 autobuild 대신 직접 빌드 스텝 추가
+      - name: Autobuild (JS/TS usually OK)
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
