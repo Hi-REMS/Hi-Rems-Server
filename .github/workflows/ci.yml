@@ -2,16 +2,44 @@ name: Node API CI
 
 on:
   push:
-    branches: [ "**" ]          #
+    branches: [ "**" ]
   pull_request:
-    branches: [ "**" ]          
-  workflow_dispatch:             
+    branches: [ "**" ]
+  workflow_dispatch:
 
 jobs:
-  build-and-test:
+  # ---------------- Lint ----------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run ESLint
+        run: npm run lint
+
+  # ---------------- Build ----------------
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Build
+        run: npm run build || echo "no build"
+
+  # ---------------- Test (DB 포함) ----------------
+  test:
+    needs: build
     runs-on: ubuntu-latest
 
-    # CI 내부에서만 쓰는 테스트용 DB 컨테이너 (운영과 완전 분리)
     services:
       mysql:
         image: mysql:8
@@ -35,32 +63,24 @@ jobs:
           --health-interval=10s --health-timeout=5s --health-retries=10
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      # CI용 .env 생성 (운영 DB와 분리된 로컬 컨테이너 접속값)
       - name: Create .env for CI
         run: |
           cp .env.example .env
           {
             echo "NODE_ENV=ci"
             echo "PORT=3000"
-
-            # PostgreSQL (컨테이너)
             echo "DB_HOST=127.0.0.1"
             echo "DB_PORT=5432"
             echo "DB_NAME=alliothub"
             echo "DB_USER=postgres"
             echo "DB_PASS=postgres"
             echo "DB_SSL=false"
-
-            # MariaDB (컨테이너)
             echo "MYSQL_HOST=127.0.0.1"
             echo "MYSQL_PORT=3306"
             echo "MYSQL_DB=alliothub"
@@ -68,11 +88,7 @@ jobs:
             echo "MYSQL_PASS=root"
             echo "MYSQL_SSL=false"
             echo "MYSQL_CONN_LIMIT=10"
-
-            # CORS
             echo "CORS_ORIGIN=http://127.0.0.1:8080"
-
-            # 외부 API 키 (Secrets)
             echo "KAKAO_JS_KEY=${{ secrets.KAKAO_JS_KEY }}"
             echo "KAKAO_REST_KEY=${{ secrets.KAKAO_REST_KEY }}"
             echo "KMA_VILAGE_KEY=${{ secrets.KMA_VILAGE_KEY }}"
@@ -82,14 +98,7 @@ jobs:
             echo "KMA_ASOS_FALLBACK_STNID=108"
           } >> .env
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Build (optional)
-        run: npm run build || echo "no build"
+      - run: npm ci
 
       - name: Start server and wait for /health
         env:
@@ -109,7 +118,7 @@ jobs:
             fi
           done
 
-      - name: Run tests (optional)
+      - name: Run tests
         run: npm test || echo "no tests"
 
       - name: Upload server log on failure
