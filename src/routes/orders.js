@@ -6,12 +6,22 @@
 //   • 반환 필드: id, product, qty, status
 // - 응답: JSON 배열 [{ id, product, qty, status }]
 
-
-// 지도 띄울 때 필요한 로직
-
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
+const rateLimit = require('express-rate-limit');
+
+// ---------------------
+// Rate limiter
+// ---------------------
+// 1분에 40회로 제한
+const ordersLimiter = rateLimit({
+  windowMs: 60 * 1000, 
+  max: 40,            
+  message: { error: 'Too many requests — try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
  * GET /api/orders
@@ -20,8 +30,7 @@ const { pool } = require('../db/db.pg');
  *   • limit (기본 50, 최대 200)
  *   • offset (기본 0)
  */
-
-router.get('/', async (req, res, next) => {
+router.get('/', ordersLimiter, async (req, res, next) => {
   try {
     // --- 파라미터 처리 ---
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);

@@ -10,6 +10,19 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
+const rateLimit = require('express-rate-limit');
+
+// ---------------------
+// Rate limiter
+// ---------------------
+// 로그는 데이터양이 많으므로 1분에 20회로 제한
+const logsLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1분
+  max: 20,             // 1분당 최대 25회
+  message: { error: 'Too many requests — try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
  * GET /api/logs
@@ -21,7 +34,7 @@ const { pool } = require('../db/db.pg');
  *   • deviceModel (선택)
  *   • msgType (선택)
  */
-router.get('/', async (req, res, next) => {
+router.get('/', logsLimiter, async (req, res, next) => {
   try {
     // --- 파라미터 처리 ---
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
@@ -36,11 +49,9 @@ router.get('/', async (req, res, next) => {
     if (msgType)     { args.push(msgType);     conds.push(`"msgType" = $${args.length}`); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
-    // --- limit / offset 인덱스 ---
     args.push(limit);  const limIdx = args.length;
     args.push(offset); const offIdx = args.length;
 
-    // --- SQL ---
     const sql = `
       SELECT id, time, "deviceModel", "msgType", "opMode", "multiId", "rtuImei",
              "bodyLength",
@@ -51,7 +62,6 @@ router.get('/', async (req, res, next) => {
       LIMIT $${limIdx} OFFSET $${offIdx}
     `;
 
-    // --- 실행 ---
     const { rows } = await pool.query(sql, args);
     res.json(rows);
   } catch (e) {
