@@ -5,24 +5,45 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
+const rateLimit = require('express-rate-limit');
 const { mysqlPool } = require('../db/db.mysql');
 
+// ---------------------
+// Rate limiters
+// ---------------------
+const makeLimiter = (maxPerMin) =>
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: maxPerMin,
+    message: { error: 'Too many requests — try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+// 외부 API 프록시는 더 엄격하게
+const limiterKey      = makeLimiter(20); // /kakao-jskey
+const limiterGeocode  = makeLimiter(15); // /geocode (외부 API 호출)
+const limiterList     = makeLimiter(30); // / (목록 조회)
+const limiterAggSido  = makeLimiter(20); // /agg/sido
+const limiterAggSigu  = makeLimiter(30); // /agg/sigungu
+
 // =====================
-// (추가) 카카오 JS키 전달
+// 카카오 JS키 전달
 // =====================
-router.get('/kakao-jskey', (_req, res) => {
+router.get('/kakao-jskey', limiterKey, (_req, res) => {
   const key = process.env.KAKAO_JS_KEY || '';
   if (!key) return res.status(500).json({ error: 'KAKAO_JS_KEY is not configured' });
   res.json({ key });
 });
 
 // =====================
-// (추가) 카카오 로컬 지오코딩 프록시(REST 키 사용)
+// 카카오 로컬 지오코딩 프록시(REST 키 사용)
 // =====================
-router.get('/geocode', async (req, res, next) => {
+router.get('/geocode', limiterGeocode, async (req, res, next) => {
   try {
     const query = (req.query.query || '').trim();
     if (!query) return res.status(400).json({ error: 'query is required' });
+    if (query.length > 100) return res.status(400).json({ error: 'query too long' }); // 간단한 남용 방지
 
     const REST_KEY = process.env.KAKAO_REST_KEY || '';
     if (!REST_KEY) return res.status(500).json({ error: 'KAKAO_REST_KEY is not configured' });
@@ -49,7 +70,7 @@ router.get('/geocode', async (req, res, next) => {
  * GET /api/rems
  * - REMS 장비 목록 조회
  */
-router.get('/', async (req, res, next) => {
+router.get('/', limiterList, async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
     const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);
@@ -80,7 +101,7 @@ router.get('/', async (req, res, next) => {
 /**
  * GET /api/rems/agg/sido
  */
-router.get('/agg/sido', async (_req, res, next) => {
+router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
   try {
     const sql = `
       SELECT name, COUNT(*) AS count
@@ -119,7 +140,7 @@ router.get('/agg/sido', async (_req, res, next) => {
           AND raw NOT LIKE '연락처%'
           AND (
             raw REGEXP '(도|광역시|특별시|특별자치시|특별자치도)$'
-            OR raw IN ('서울','부산','대구','인천','광주','대전','울산','세종','제주',
+            OR raw IN ('서울','부산','대구','इन천','광주','대전','울산','세종','제주',
                        '경남','경북','전남','전북','충남','충북','강원')
           )
       ) x
@@ -134,7 +155,7 @@ router.get('/agg/sido', async (_req, res, next) => {
 /**
  * GET /api/rems/agg/sigungu?sido=경기도
  */
-router.get('/agg/sigungu', async (req, res, next) => {
+router.get('/agg/sigungu', limiterAggSigu, async (req, res, next) => {
   try {
     const sido = (req.query.sido || '').trim();
     if (!sido) return res.status(400).json({ error: 'sido is required' });
