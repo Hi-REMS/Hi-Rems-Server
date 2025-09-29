@@ -17,7 +17,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: node -v && npm -v
+      - run: npm config set legacy-peer-deps true
+      - run: npm ci --no-audit --no-fund
       - name: Run ESLint
         run: npm run lint
 
@@ -31,7 +33,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: node -v && npm -v
+      - run: npm config set legacy-peer-deps true
+      - run: npm ci --no-audit --no-fund
       - name: Build
         run: npm run build || echo "no build"
 
@@ -69,6 +73,10 @@ jobs:
           node-version: 20
           cache: npm
 
+      - run: node -v && npm -v
+      - run: npm config set legacy-peer-deps true
+      - run: npm ci --no-audit --no-fund
+
       - name: Create .env for CI
         run: |
           cp .env.example .env
@@ -97,8 +105,6 @@ jobs:
             echo "KMA_ASOS_ENDPOINT=http://apis.data.go.kr/1360000/AsosDalyInfoService/getWthrDataList"
             echo "KMA_ASOS_FALLBACK_STNID=108"
           } >> .env
-
-      - run: npm ci
 
       - name: Start server and wait for /health
         env:
