@@ -17,9 +17,9 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run lint:fix   # <- 자동수정
-      - run: npm run lint       # <- 최종 검증(남은 에러만 잡힘)
-
+      - run: npm run lint:fix  
+      - run: npm run lint  
+        working-directory: ./backend
   # ---------------- Build ----------------
   build:
     needs: lint
