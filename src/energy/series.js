@@ -24,7 +24,7 @@ const ONLY_OK = `AND split_part(body,' ',5) = '00'`;
 // ★ 이 엔드포인트 전용 레이트 리미터 (1분에 최대 10회)
 const seriesLimiter = rateLimit({
   windowMs: 60 * 1000, // 1분
-  max: 10,
+  max: 100,
   message: { error: 'Too many requests — try again later.' },
   standardHeaders: true,
   legacyHeaders: false,

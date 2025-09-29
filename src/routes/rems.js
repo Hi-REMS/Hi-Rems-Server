@@ -149,7 +149,7 @@ router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
     `;
     const [rows] = await mysqlPool.query(sql);
     res.json(rows.map(r => ({ name: r.name || '기타/미상', count: Number(r.count) })));
-  } catch (e) { next(e); }
+  } catch (e) { next(e); }z
 });
 
 /**
