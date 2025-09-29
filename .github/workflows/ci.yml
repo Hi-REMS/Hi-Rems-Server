@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: .   # ✅ 레포 루트
+        working-directory: .   # 레포 루트에서 실행(= 현재 백엔드 위치)
     steps:
       - uses: actions/checkout@v4
 
@@ -21,25 +21,26 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json   # ✅ 루트 기준
+          cache-dependency-path: package-lock.json   # 루트 기준
 
       - name: Show tree (debug)
         run: |
           pwd
           ls -la
-          cat package.json | head -n 20 || true
+          cat package.json | head -n 30 || true
 
       - name: Install deps
         run: npm ci --no-audit --no-fund
 
       - name: Show npm scripts (debug)
-        run: npm run
+        run: node -p "require('./package.json').scripts"
 
+      # ✅ 스크립트 의존 X: ESLint 직접 호출
       - name: Lint (fix)
-        run: npm run lint:fix
+        run: npx eslint . --ext .js,.cjs,.mjs --fix
 
       - name: Lint (report)
-        run: npm run lint
+        run: npx eslint . --ext .js,.cjs,.mjs
 
   # ---------------- Build ----------------
   build:
