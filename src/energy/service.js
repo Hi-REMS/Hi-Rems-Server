@@ -33,7 +33,7 @@ const jsonSafe = (obj) =>
   JSON.parse(JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
 
 const isImeiLike = (s) => typeof s === 'string' && s.length >= 8;
-const ONLY_OK = `AND split_part(body,' ',5) = '00'`;
+const ONLY_OK = 'AND split_part(body,\' \',5) = \'00\'';
 
 /* ---------- 공통 유틸 ---------- */
 const mapByMulti = (rows) => {
@@ -51,8 +51,8 @@ async function firstAfter(imei, tsUtc, energyHex = null, typeHex = null) {
     SELECT "time", body
     FROM public.log_rtureceivelog
     WHERE "rtuImei" = $1 AND "time" >= $2
-      ${energyHex ? `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}` : ``}
-      ${typeHex   ? `AND split_part(body,' ',3) = $${idx++}` : ``}
+      ${energyHex ? `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}` : ''}
+      ${typeHex   ? `AND split_part(body,' ',3) = $${idx++}` : ''}
       ${ONLY_OK}
     ORDER BY "time" ASC
     LIMIT 1`;
@@ -69,8 +69,8 @@ async function lastBeforeNow(imei, energyHex = null, typeHex = null) {
     SELECT "time", body
     FROM public.log_rtureceivelog
     WHERE "rtuImei" = $1
-      ${energyHex ? `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}` : ``}
-      ${typeHex   ? `AND split_part(body,' ',3) = $${idx++}` : ``}
+      ${energyHex ? `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}` : ''}
+      ${typeHex   ? `AND split_part(body,' ',3) = $${idx++}` : ''}
       ${ONLY_OK}
     ORDER BY "time" DESC
     LIMIT 1`;
@@ -374,12 +374,12 @@ router.get('/electric/preview', limiterPreview, async (req, res, next) => { // �
     const onlyOk    = String(req.query.ok || '') === '1';
     const multiHex  = (req.query.multi  || '').toLowerCase();  // ★ 추가
 
-    const conds = [`"rtuImei" = $1`];
+    const conds = ['"rtuImei" = $1'];
     const params = [imei];
     if (energyHex) { conds.push(`left(body,2)='14' AND split_part(body,' ',2) = $${params.length+1}`); params.push(energyHex); }
     if (typeHex)   { conds.push(`split_part(body,' ',3) = $${params.length+1}`);                       params.push(typeHex);   }
     if (multiHex)  { conds.push(`split_part(body,' ',4) = $${params.length+1}`);                       params.push(multiHex); } // ★ 추가
-    if (onlyOk)    { conds.push(`split_part(body,' ',5)='00'`); }
+    if (onlyOk)    { conds.push('split_part(body,\' \',5)=\'00\''); }
 
     const q = `
       SELECT "time", body

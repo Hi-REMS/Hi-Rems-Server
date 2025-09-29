@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ---------------- Lint ----------------
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -17,11 +16,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: node -v && npm -v
-      - run: npm config set legacy-peer-deps true
-      - run: npm ci --no-audit --no-fund
-      - name: Run ESLint
-        run: npm run lint
+      - run: npm ci
+      - run: npm run lint:fix   # <- 자동수정
+      - run: npm run lint       # <- 최종 검증(남은 에러만 잡힘)
 
   # ---------------- Build ----------------
   build:

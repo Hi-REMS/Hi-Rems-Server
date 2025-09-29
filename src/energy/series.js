@@ -19,7 +19,7 @@ const TREE_KG = 6.6;
 const round2 = v => Math.round(v * 100) / 100;
 
 const isImeiLike = s => typeof s === 'string' && s.length >= 8;
-const ONLY_OK = `AND split_part(body,' ',5) = '00'`;
+const ONLY_OK = 'AND split_part(body,\' \',5) = \'00\'';
 
 // ★ 이 엔드포인트 전용 레이트 리미터 (1분에 최대 10회)
 const seriesLimiter = rateLimit({
@@ -128,7 +128,7 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     }
 
     // ===== 데이터 조회 =====
-    const conds = [`"rtuImei" = $1`, `"time" >= $2`, `"time" < $3`, ONLY_OK.replace(/^AND\s+/, '')];
+    const conds = ['"rtuImei" = $1', '"time" >= $2', '"time" < $3', ONLY_OK.replace(/^AND\s+/, '')];
     const params = [imei, startUtc, endUtc];
     if (energyHex) { conds.push(`left(body,2)='14' AND split_part(body,' ',2) = $${params.length+1}`); params.push(energyHex); }
     if (typeHex)   { conds.push(`split_part(body,' ',3) = $${params.length+1}`);                       params.push(typeHex);   }
