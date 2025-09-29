@@ -2,9 +2,9 @@ name: Node API CI
 
 on:
   push:
-    branches: [ "**" ]
+    branches: ["**"]
   pull_request:
-    branches: [ "**" ]
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
@@ -12,29 +12,84 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      # ▶ 워크디렉토리 자동 감지: backend/package.json 있으면 backend, 없으면 루트(".")
+      - name: Detect workdir
+        id: detect
+        run: |
+          if [ -f backend/package.json ]; then
+            echo "workdir=backend" >> $GITHUB_OUTPUT
+          elif [ -f package.json ]; then
+            echo "workdir=." >> $GITHUB_OUTPUT
+          else
+            echo "❌ package.json을 찾을 수 없습니다."
+            exit 1
+          fi
+          echo "Detected workdir: ${WORKDIR:-$(cat $GITHUB_OUTPUT || true)}"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
-      - run: npm run lint:fix  
-      - run: npm run lint  
-        working-directory: ./backend
+          # 두 경로 모두 캐시 후보로 지정(존재하는 쪽만 사용됨)
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Install deps
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm ci --no-audit --no-fund
+
+      - name: Lint (fix)
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm run lint:fix
+
+      - name: Lint (report)
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm run lint
+
   # ---------------- Build ----------------
   build:
     needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect workdir
+        id: detect
+        run: |
+          if [ -f backend/package.json ]; then
+            echo "workdir=backend" >> $GITHUB_OUTPUT
+          elif [ -f package.json ]; then
+            echo "workdir=." >> $GITHUB_OUTPUT
+          else
+            echo "❌ package.json을 찾을 수 없습니다."
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
       - run: node -v && npm -v
-      - run: npm config set legacy-peer-deps true
-      - run: npm ci --no-audit --no-fund
+
+      - name: Install deps
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm ci --no-audit --no-fund
+
       - name: Build
-        run: npm run build || echo "no build"
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm run build || echo "no build"
 
   # ---------------- Test (DB 포함) ----------------
   test:
@@ -47,7 +102,7 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: alliothub
-        ports: [ "3306:3306" ]
+        ports: ["3306:3306"]
         options: >-
           --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=10s --health-timeout=5s --health-retries=10
@@ -58,25 +113,46 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: alliothub
-        ports: [ "5432:5432" ]
+        ports: ["5432:5432"]
         options: >-
           --health-cmd="pg_isready -U postgres -d alliothub"
           --health-interval=10s --health-timeout=5s --health-retries=10
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect workdir
+        id: detect
+        run: |
+          if [ -f backend/package.json ]; then
+            echo "workdir=backend" >> $GITHUB_OUTPUT
+          elif [ -f package.json ]; then
+            echo "workdir=." >> $GITHUB_OUTPUT
+          else
+            echo "❌ package.json을 찾을 수 없습니다."
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
 
       - run: node -v && npm -v
       - run: npm config set legacy-peer-deps true
-      - run: npm ci --no-audit --no-fund
+
+      - name: Install deps
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm ci --no-audit --no-fund
 
       - name: Create .env for CI
         run: |
-          cp .env.example .env
+          cd "${{ steps.detect.outputs.workdir }}"
+          cp .env.example .env 2>/dev/null || true
           {
             echo "NODE_ENV=ci"
             echo "PORT=3000"
@@ -107,6 +183,7 @@ jobs:
         env:
           PORT: 3000
         run: |
+          cd "${{ steps.detect.outputs.workdir }}"
           nohup npm start > server.log 2>&1 &
           for i in {1..40}; do
             if curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
@@ -122,11 +199,13 @@ jobs:
           done
 
       - name: Run tests
-        run: npm test || echo "no tests"
+        run: |
+          cd "${{ steps.detect.outputs.workdir }}"
+          npm test || echo "no tests"
 
       - name: Upload server log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: server-log
-          path: server.log
+          path: ${{ steps.detect.outputs.workdir }}/server.log
