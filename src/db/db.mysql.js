@@ -19,14 +19,6 @@ const {
 } = process.env;
 
 /*
-rejectUnauthorized : false는 자체 서명 인증서 같은 경우 검증을 무시
-*/
-const ssl =
-  String(MYSQL_SSL).toLowerCase() === 'true'
-    ? { rejectUnauthorized: false }
-    : undefined;
-
-/*
 커넥션 풀 생성
 */
 const mysqlPool = mysql.createPool({

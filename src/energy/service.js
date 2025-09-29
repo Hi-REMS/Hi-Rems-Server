@@ -44,24 +44,6 @@ const mapByMulti = (rows) => {
   return m;
 };
 
-/* ---------- SQL helpers (단일) ---------- */
-async function firstAfter(imei, tsUtc, energyHex = null, typeHex = null) {
-  let idx = 3;
-  const sql = `
-    SELECT "time", body
-    FROM public.log_rtureceivelog
-    WHERE "rtuImei" = $1 AND "time" >= $2
-      ${energyHex ? `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}` : ''}
-      ${typeHex   ? `AND split_part(body,' ',3) = $${idx++}` : ''}
-      ${ONLY_OK}
-    ORDER BY "time" ASC
-    LIMIT 1`;
-  const params = [imei, tsUtc];
-  if (energyHex) params.push(energyHex);
-  if (typeHex) params.push(typeHex);
-  const r = await pool.query(sql, params);
-  return r.rows[0] || null;
-}
 
 async function lastBeforeNow(imei, energyHex = null, typeHex = null) {
   let idx = 2;
@@ -234,8 +216,6 @@ function pickMetrics(hex) {
   }
   return { wh, w: Number.isFinite(w) ? w : null, eff, energy: p.energy, type: p.type };
 }
-
-function biToNumber(bi) { if (typeof bi !== 'bigint') return null; return Number(bi); }
 
 /* ---------- endpoints ---------- */
 

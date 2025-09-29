@@ -66,7 +66,7 @@ app.get('/api/health-direct', async (_req, res) => {
 });
 
 // -------------------- 오류 핸들러 --------------------
-app.use((err, _req, res, _next) => {
+app.use((err, _req, res) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Server Error' });
 });

@@ -47,8 +47,6 @@ function haversine(lat1, lon1, lat2, lon2) {
 function nearestAsos(geo, opt = {}) {
   const { lat, lon } = geo || {};
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-  const maxKm = opt.maxKm ?? 120; // 선호 반경
   let best = null;
 
   for (const s of stations) {
