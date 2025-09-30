@@ -14,8 +14,8 @@ const energySeriesRoutes  = require('./energy/series');
 const vilageFcstRoutes        = require('./routes/weather.vilageFcst');
 const vilageFcstByPointRoutes = require('./routes/weather.vilageFcst.byPoint');
 const asosDailyRoutes         = require('./routes/weather.asosDaily');
-
 const exportMonthCsvRoutes    = require('./routes/export.monthCsv');
+const authRoutes = require('./routes/auth');
 
 // -------------------- 라우터 마운트 --------------------
 // 최상위
@@ -39,5 +39,7 @@ router.use('/energy',          energyRoutes);
 
 // 익스포트
 router.use('/export', exportMonthCsvRoutes);
+
+router.use('/auth', authRoutes);
 
 module.exports = router;

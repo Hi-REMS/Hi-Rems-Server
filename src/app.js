@@ -10,16 +10,17 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser'); // ✅ 쿠키 지원
 const api = require('./api');
 
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
 
 // 프록시(Nginx/Cloudflare 등) 뒤에서 실제 클라이언트 IP 인식
 app.set('trust proxy', 1);
 
 // -------------------- CORS 설정 --------------------
-// 개발 시: 특정 프론트엔드(dev 서버)만 허용
 const whitelist = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
@@ -31,10 +32,10 @@ app.use(cors({
     if (!whitelist.length || whitelist.includes(origin)) return cb(null, true);
     cb(new Error('Not allowed by CORS'));
   },
+  credentials: true,
 }));
 
 // -------------------- 헬스 체크 --------------------
-// 전역 리미터보다 "먼저" 선언하여 완전히 제외 (모니터링 안정성)
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, uptime: process.uptime() });
 });
@@ -47,8 +48,6 @@ const globalLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => (req.path || '') === '/api/health-direct',
 });
-
-// 전역 미들웨어로 적용 (CORS 이후, 라우트 등록 이전)
 app.use(globalLimiter);
 
 // -------------------- 라우트 마운트 --------------------
@@ -66,7 +65,7 @@ app.get('/api/health-direct', async (_req, res) => {
 });
 
 // -------------------- 오류 핸들러 --------------------
-app.use((err, _req, res) => {
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Server Error' });
 });
