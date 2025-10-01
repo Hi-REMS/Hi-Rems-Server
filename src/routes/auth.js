@@ -1,39 +1,19 @@
-// src/routes/auth.js
 const express = require('express');
 const argon2 = require('argon2');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../db/db.pg'); // src/db/db.pg.js
-const { requireAuth } = require('../middlewares/requireAuth');
+const rateLimit = require('express-rate-limit');
+const { pool } = require('../db/db.pg');
+const { requireAuth, cookieOpts, signAccessToken } = require('../middlewares/requireAuth');
 
 const router = express.Router();
 
-/* 쿠키 옵션: 세션 쿠키 (브라우저 닫으면 삭제) */
-function cookieOpts() {
-  const prod = process.env.NODE_ENV === 'production';
-  const domain = process.env.COOKIE_DOMAIN || undefined;
-  return {
-    httpOnly: true,
-    secure: prod,
-    sameSite: prod ? 'none' : 'lax',
-    domain,
-    // maxAge / expires 없음 → 세션 쿠키
-  };
-}
-
-/* JWT 생성기
-   - sess(세션 시작 시각) 넣어서 1시간 절대만료 체크에 활용
-*/
-function signAccessToken(user, sess) {
-  const sessionStart = sess ?? Date.now();
-  return jwt.sign(
-    { username: user.username, sess: sessionStart },
-    process.env.JWT_ACCESS_SECRET,
-    {
-      subject: String(user.member_id),
-      expiresIn: process.env.ACCESS_TOKEN_EXPIRES || '15m', // 슬라이딩 만료(기본 15분)
-    }
-  );
-}
+/* 로그인 시도 횟수 제한 (브루트포스 방지) */
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10분
+  max: 50,                  // 10분 동안 50회 이상 로그인 차단
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /* 회원가입 */
 router.post('/register', async (req, res) => {
@@ -60,7 +40,6 @@ router.post('/register', async (req, res) => {
     );
     const user = rows[0];
 
-    // 가입 직후 자동 로그인
     const access = signAccessToken(user);
     res
       .cookie('access_token', access, cookieOpts())
@@ -73,7 +52,7 @@ router.post('/register', async (req, res) => {
 });
 
 /* 로그인 */
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (!username || !password) {
