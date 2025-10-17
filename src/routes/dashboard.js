@@ -1,18 +1,20 @@
 // src/routes/dashboard.js
 // 대시보드 요약/건강 지표 API 라우트
-// - GET /dashboard/basic           : 플랜트/장치 개수 및 금일 메시지/장치 통계
-// - GET /dashboard/energy          : 전국 에너지 요약 (캐시 적용)
+// - GET /dashboard/basic
+// - GET /dashboard/energy
 
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
-const { getNationwideEnergySummary } = require('../energy/summary');
 const rateLimit = require('express-rate-limit');
+
+const path = require('path');
+const { getCache } = require(path.join(__dirname, '../jobs/energyRefresh'));
+const { getNationwideEnergySummary } = require('../energy/summary');
 
 // ---------------------
 // Rate limiters
 // ---------------------
-// 기본 대시보드: 1분 20회
 const limiterBasic = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
@@ -21,7 +23,6 @@ const limiterBasic = rateLimit({
   legacyHeaders: false,
 });
 
-// 에너지 요약: 캐시가 있으므로 1분 10회로 더 엄격히
 const limiterEnergy = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -32,15 +33,12 @@ const limiterEnergy = rateLimit({
 
 /**
  * 기본 대시보드 지표
- * - lookbackDays(기본 3일) 동안 각 장치의 최신 opMode를 기준으로 정상/비정상 카운트
- * - 오늘(KST 00:00~24:00) 수신된 전체 메시지 수, 참여 장치 수
  */
 router.get('/basic', limiterBasic, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
 
-    const { rows: statusRows } = await pool.query(
-      `
+    const { rows: statusRows } = await pool.query(`
       WITH recent_latest AS (
         SELECT DISTINCT ON ("rtuImei")
                "rtuImei", "opMode", "time"
@@ -53,9 +51,7 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
         COUNT(*) FILTER (WHERE "opMode" = '0')::int             AS normal_plants,
         COUNT(*) FILTER (WHERE "opMode" <> '0')::int            AS abnormal_plants
       FROM recent_latest;
-      `,
-      [lookbackDays]
-    );
+    `, [lookbackDays]);
 
     const { rows: todayRows } = await pool.query(`
       WITH bounds AS (
@@ -88,17 +84,23 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
   }
 });
 
-let energyCache = { data: null, ts: 0 };
-const ENERGY_CACHE_MS = Number(process.env.ENERGY_CACHE_MS || '60000');
-
+/**
+ * 전국 에너지 요약 (크론 캐시 기반)
+ */
 router.get('/energy', limiterEnergy, async (_req, res, next) => {
-  const now = Date.now();
-  if (energyCache.data && (now - energyCache.ts < ENERGY_CACHE_MS)) {
-    return res.json({ ok: true, data: energyCache.data, cached: true });
-  }
   try {
+    const cache = getCache();
+
+    if (cache?.electric && cache?.thermal) {
+      return res.json({
+        ok: true,
+        data: { electric: cache.electric, thermal: cache.thermal },
+        cached: true,
+        updatedAt: cache.updatedAt,
+      });
+    }
+
     const data = await getNationwideEnergySummary();
-    energyCache = { data, ts: now };
     res.json({ ok: true, data, cached: false });
   } catch (e) {
     next(e);

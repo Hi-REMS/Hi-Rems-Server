@@ -10,8 +10,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser'); // ✅ 쿠키 지원
+const cookieParser = require('cookie-parser');
 const api = require('./api');
+const path = require('path');
+const { setupEnergyCron } = require(path.join(__dirname, './jobs/energyRefresh'));
+
 
 const app = express();
 app.use(express.json());
@@ -63,6 +66,8 @@ app.get('/api/health-direct', async (_req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+setupEnergyCron();
 
 // -------------------- 오류 핸들러 --------------------
 app.use((err, _req, res, _next) => {
