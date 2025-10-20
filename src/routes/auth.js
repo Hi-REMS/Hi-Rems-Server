@@ -92,8 +92,8 @@ router.post('/register', async (req, res) => {
     const raw = req.body || {};
     const username = String(raw.username || '').trim().toLowerCase();
     const password = String(raw.password || '');
-    const worker   = String(raw.worker || '').trim();   // ✅ 추가
-    const address  = String(raw.address || '').trim();  // ✅ 추가
+    const worker   = String(raw.worker || '').trim();
+    const address  = String(raw.address || '').trim();
 
     if (!username || !password || !worker || !address) {
       return res.status(400).json({ message: 'username/password/worker/address required' });
@@ -120,7 +120,6 @@ router.post('/register', async (req, res) => {
       parallelism: 1,
     });
 
-    // ✅ worker, address 저장
     const { rows } = await client.query(
       `INSERT INTO public.members (username, password, worker, address)
        VALUES ($1, $2, $3, $4)
@@ -200,7 +199,7 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-/* 비밀번호 찾기/재설정 (기존 그대로) */
+/* 비밀번호 찾기/재설정 */
 router.post('/forgot', forgotLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -224,19 +223,43 @@ router.post('/forgot', forgotLimiter, async (req, res) => {
       [user.member_id, hash, ttlMin]
     );
 
+    const APP_NAME = process.env.APP_NAME || 'Hi-REMS';
+    const SUPPORT = process.env.SUPPORT_EMAIL || process.env.SMTP_USER || 'noreply@example.com';
+
     const appBase = process.env.APP_BASE_URL || 'http://localhost:5173';
     const link = `${appBase}/#/reset?token=${encodeURIComponent(token)}`;
 
-    const subject = 'Hi-REMS 비밀번호 재설정 안내';
-    const text = `아래 링크에서 비밀번호를 재설정하세요 (유효기간 ${ttlMin}분)\n${link}`;
+    const subject = `[${APP_NAME}] 비밀번호 재설정 안내`;
+    const text =
+`안녕하세요, ${APP_NAME} 입니다.
+
+아래 링크에서 새 비밀번호를 설정해 주세요. (유효기간 ${ttlMin}분)
+${link}
+
+본인이 요청하지 않았다면 이 메일은 무시하셔도 됩니다.
+문의: ${SUPPORT}`;
     const html = `
-      <p>아래 버튼을 눌러 비밀번호를 재설정하세요. (유효기간 ${ttlMin}분)</p>
-      <p><a href="${link}" style="display:inline-block;padding:10px 16px;background:#00b3a4;color:#fff;text-decoration:none;border-radius:6px;">비밀번호 재설정</a></p>
-      <p>또는 다음 링크를 복사해 브라우저에 붙여넣기:<br/>${link}</p>
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,'Apple SD Gothic Neo','Noto Sans KR',sans-serif; line-height:1.6; color:#222;">
+        <h2 style="margin:0 0 12px;">${APP_NAME} 비밀번호 재설정</h2>
+        <p>아래 버튼을 눌러 <strong>새 비밀번호</strong>를 설정해 주세요.<br>
+           이 링크의 유효기간은 <strong>${ttlMin}분</strong>입니다.</p>
+        <p style="margin:16px 0;">
+          <a href="${link}" style="display:inline-block;padding:12px 18px;border-radius:8px;background:#00b3a4;color:#fff;text-decoration:none;font-weight:700;">
+            비밀번호 재설정
+          </a>
+        </p>
+        <p style="margin:14px 0 6px; font-size:14px; color:#444;">버튼이 클릭되지 않으면 아래 주소를 브라우저 주소창에 복사해 붙여넣기 하세요:</p>
+        <p style="word-break:break-all; font-size:13px; color:#555;">${link}</p>
+        <hr style="border:none;border-top:1px solid #eee;margin:18px 0;">
+        <p style="font-size:13px; color:#666;">
+          본인이 요청하지 않았다면 이 메일은 무시하셔도 됩니다.<br>
+          문의: <a href="mailto:${SUPPORT}" style="color:#0b7">${SUPPORT}</a>
+        </p>
+      </div>
     `;
 
     await sendMail({ to: user.username, subject, text, html });
-    return res.json({ ok:true, message: '재설정 안내를 이메일로 발송했습니다.' });
+    return res.json({ ok:true, message: '재설정 안내를 이메일로 발송했습니다.', ttlMin });
   } catch (e) {
     console.error('[forgot] error:', e);
     return res.status(500).json({ ok:false, message: 'forgot failed' });
@@ -244,6 +267,7 @@ router.post('/forgot', forgotLimiter, async (req, res) => {
     client.release();
   }
 });
+
 
 router.post('/reset', async (req, res) => {
   const client = await pool.connect();
