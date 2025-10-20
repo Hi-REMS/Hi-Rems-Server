@@ -10,9 +10,7 @@ const { requireAuth, cookieOpts, signAccessToken } = require('../middlewares/req
 
 const router = express.Router();
 
-/* ─────────────────────────────────────────────────────
- * 공통 유틸
- * ───────────────────────────────────────────────────── */
+/* 공통 유틸 */
 function clientInfo(req) {
   return {
     ip: req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || null,
@@ -33,7 +31,7 @@ async function logLoginAttempt({ member_id = null, username = null, success, ip,
   }
 }
 
-/* 비밀번호 정책(프론트와 동일 규칙) */
+/* 비밀번호 정책 */
 function validatePassword(pw, username) {
   const errors = [];
   if (!pw || pw.length < 8) errors.push('8자 이상이어야 합니다.');
@@ -64,43 +62,49 @@ async function sendMail({ to, subject, text, html }) {
   await transporter.sendMail({ from: `"Hi-REMS" <${SMTP_USER}>`, to, subject, text, html });
 }
 
-/* 재설정 토큰(평문/해시 분리) */
+/* 재설정 토큰 */
 function createResetToken() {
   const token = crypto.randomBytes(32).toString('base64url');
   const hash = crypto.createHash('sha256').update(token).digest('base64url');
   return { token, hash };
 }
 
-/* ─────────────────────────────────────────────────────
- * Rate Limit
- * ───────────────────────────────────────────────────── */
+/* Rate Limit */
 const loginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10분
+  windowMs: 10 * 60 * 1000,
   max: 50,
   standardHeaders: true,
   legacyHeaders: false,
 });
-
 const forgotLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10분
+  windowMs: 10 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 /* ─────────────────────────────────────────────────────
- * 회원가입
+ * 회원가입: worker(이름), address(주소) 추가
  * ───────────────────────────────────────────────────── */
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { username, password } = req.body || {};
-    if (!username || !password) {
-      return res.status(400).json({ message: 'username/password required' });
+    const raw = req.body || {};
+    const username = String(raw.username || '').trim().toLowerCase();
+    const password = String(raw.password || '');
+    const worker   = String(raw.worker || '').trim();   // ✅ 추가
+    const address  = String(raw.address || '').trim();  // ✅ 추가
+
+    if (!username || !password || !worker || !address) {
+      return res.status(400).json({ message: 'username/password/worker/address required' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username)) {
+      return res.status(400).json({ message: 'invalid email format' });
     }
 
+    // 이메일 중복(대소문자 무시)
     const { rows: dup } = await client.query(
-      'SELECT 1 FROM public.members WHERE username=$1',
+      'SELECT 1 FROM public.members WHERE LOWER(username)=$1',
       [username]
     );
     if (dup.length) {
@@ -116,11 +120,12 @@ router.post('/register', async (req, res) => {
       parallelism: 1,
     });
 
+    // ✅ worker, address 저장
     const { rows } = await client.query(
-      `INSERT INTO public.members (username, password)
-       VALUES ($1, $2)
-       RETURNING member_id, username, password`,
-      [username, hash]
+      `INSERT INTO public.members (username, password, worker, address)
+       VALUES ($1, $2, $3, $4)
+       RETURNING member_id, username, password, worker, address`,
+      [username, hash, worker, address]
     );
     const user = rows[0];
 
@@ -136,7 +141,7 @@ router.post('/register', async (req, res) => {
     res
       .cookie('access_token', access, cookieOpts())
       .status(201)
-      .json({ user: { id: user.member_id, username: user.username } });
+      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, address: user.address } });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(e);
@@ -146,12 +151,9 @@ router.post('/register', async (req, res) => {
   }
 });
 
-/* ─────────────────────────────────────────────────────
- * 로그인
- * ───────────────────────────────────────────────────── */
+/* 로그인 */
 router.post('/login', loginLimiter, async (req, res) => {
   const { ip, ua } = clientInfo(req);
-
   try {
     const { username, password } = req.body || {};
     if (!username || !password) {
@@ -160,8 +162,8 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      'SELECT member_id, username, password FROM public.members WHERE username=$1',
-      [username]
+      'SELECT member_id, username, password, worker, address FROM public.members WHERE username=$1',
+      [String(username).trim().toLowerCase()]
     );
     const user = rows[0];
 
@@ -181,47 +183,38 @@ router.post('/login', loginLimiter, async (req, res) => {
     const access = signAccessToken({ sub: user.member_id, username: user.username });
     res
       .cookie('access_token', access, cookieOpts())
-      .json({ user: { id: user.member_id, username: user.username } });
+      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, address: user.address } });
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: 'login failed' });
   }
 });
 
-/* ─────────────────────────────────────────────────────
- * 로그아웃 / 내 정보
- * ───────────────────────────────────────────────────── */
+/* 로그아웃 / 내 정보 */
 router.post('/logout', (req, res) => {
   res.clearCookie('access_token', cookieOpts()).json({ ok: true });
 });
 
 router.get('/me', requireAuth, (req, res) => {
+  // 미들웨어에 들어있는 최소 정보 반환(필요시 DB조회로 확장 가능)
   res.json({ user: req.user });
 });
 
-/* ─────────────────────────────────────────────────────
- * 비밀번호 찾기: 재설정 링크 발송
- * ───────────────────────────────────────────────────── */
+/* 비밀번호 찾기/재설정 (기존 그대로) */
 router.post('/forgot', forgotLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
     const raw = (req.body && req.body.username) || '';
-    const username = String(raw).trim().toLowerCase();   // 🔹 정규화(권장)
+    const username = String(raw).trim().toLowerCase();
     if (!username) return res.status(400).json({ ok:false, message: 'username required' });
 
     const { rows } = await client.query(
-      // 🔹 대소문자 무시 매칭
       'SELECT member_id, username FROM public.members WHERE LOWER(username) = $1',
       [username]
     );
     const user = rows[0];
+    if (!user) return res.status(404).json({ ok:false, message: '등록된 이메일이 없습니다.' });
 
-    // 계정 없으면 404 반환
-    if (!user) {
-      return res.status(404).json({ ok:false, message: '등록된 이메일이 없습니다.' });
-    }
-
-    // 🔹 계정 있음 → 토큰 생성 + 메일 발송
     const { token, hash } = createResetToken();
     const ttlMin = Number(process.env.RESET_TOKEN_TTL_MIN || 30);
 
@@ -243,8 +236,6 @@ router.post('/forgot', forgotLimiter, async (req, res) => {
     `;
 
     await sendMail({ to: user.username, subject, text, html });
-
-    // 계정 있을 때만 ok:true
     return res.json({ ok:true, message: '재설정 안내를 이메일로 발송했습니다.' });
   } catch (e) {
     console.error('[forgot] error:', e);
@@ -254,10 +245,6 @@ router.post('/forgot', forgotLimiter, async (req, res) => {
   }
 });
 
-
-/* ─────────────────────────────────────────────────────
- * 비밀번호 재설정: 토큰 검증 후 저장
- * ───────────────────────────────────────────────────── */
 router.post('/reset', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -316,10 +303,6 @@ router.post('/reset', async (req, res) => {
     );
 
     await client.query('COMMIT');
-
-    // (옵션) JWT 발급하여 자동 로그인하려면 아래 주석 해제
-    // const access = signAccessToken({ sub: tk.member_id, username: tk.username });
-    // return res.cookie('access_token', access, cookieOpts()).json({ ok: true });
 
     return res.json({ ok: true, message: '비밀번호가 재설정되었습니다. 다시 로그인해 주세요.' });
   } catch (e) {
