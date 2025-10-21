@@ -86,23 +86,23 @@ const forgotLimiter = rateLimit({
 /* ─────────────────────────────────────────────────────
  * 회원가입: worker(이름), address(주소) 추가
  * ───────────────────────────────────────────────────── */
+// routes/auth.js (수정본)
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
     const raw = req.body || {};
     const username = String(raw.username || '').trim().toLowerCase();
     const password = String(raw.password || '');
-    const worker   = String(raw.worker || '').trim();
-    const address  = String(raw.address || '').trim();
+    const worker = String(raw.worker || '').trim();
+    const phoneNumber = String(raw.phoneNumber || '').trim();
 
-    if (!username || !password || !worker || !address) {
-      return res.status(400).json({ message: 'username/password/worker/address required' });
+    if (!username || !password || !worker || !phoneNumber) {
+      return res.status(400).json({ message: 'username/password/worker/phoneNumber required' });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username)) {
       return res.status(400).json({ message: 'invalid email format' });
     }
 
-    // 이메일 중복(대소문자 무시)
     const { rows: dup } = await client.query(
       'SELECT 1 FROM public.members WHERE LOWER(username)=$1',
       [username]
@@ -119,12 +119,11 @@ router.post('/register', async (req, res) => {
       timeCost: 2,
       parallelism: 1,
     });
-
     const { rows } = await client.query(
-      `INSERT INTO public.members (username, password, worker, address)
+      `INSERT INTO public.members (username, password, worker, phoneNumber)
        VALUES ($1, $2, $3, $4)
-       RETURNING member_id, username, password, worker, address`,
-      [username, hash, worker, address]
+       RETURNING member_id, username, password, worker, phoneNumber`,
+      [username, hash, worker, phoneNumber]
     );
     const user = rows[0];
 
@@ -140,7 +139,7 @@ router.post('/register', async (req, res) => {
     res
       .cookie('access_token', access, cookieOpts())
       .status(201)
-      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, address: user.address } });
+      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, phoneNumber: user.phoneNumber } }); // ✅ 변경
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(e);
@@ -150,7 +149,6 @@ router.post('/register', async (req, res) => {
   }
 });
 
-/* 로그인 */
 router.post('/login', loginLimiter, async (req, res) => {
   const { ip, ua } = clientInfo(req);
   try {
@@ -161,7 +159,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      'SELECT member_id, username, password, worker, address FROM public.members WHERE username=$1',
+      'SELECT member_id, username, password, worker, phoneNumber FROM public.members WHERE username=$1',
       [String(username).trim().toLowerCase()]
     );
     const user = rows[0];
@@ -182,10 +180,94 @@ router.post('/login', loginLimiter, async (req, res) => {
     const access = signAccessToken({ sub: user.member_id, username: user.username });
     res
       .cookie('access_token', access, cookieOpts())
-      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, address: user.address } });
+      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, phoneNumber: user.phoneNumber } }); // ✅ 변경
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: 'login failed' });
+  }
+});
+
+router.post('/change-password', requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { current_password, new_password } = req.body || {};
+    const userId = req.user?.sub;     // requireAuth 미들웨어에서 넣어주는 값 (signAccessToken의 sub)
+
+    if (!current_password || !new_password) {
+      return res.status(400).json({ message: 'current_password/new_password required' });
+    }
+
+    // 현재 사용자 조회
+    const { rows } = await client.query(
+      'SELECT member_id, username, password FROM public.members WHERE member_id = $1',
+      [userId]
+    );
+    const me = rows[0];
+    if (!me) return res.status(401).json({ message: 'unauthorized' });
+
+    // 현재 비밀번호 검증
+    const ok = await argon2.verify(me.password, current_password);
+    if (!ok) return res.status(401).json({ message: '현재 비밀번호가 올바르지 않습니다.' });
+
+    // 정책 검사 (아이디 포함 금지 등)
+    const policyErrors = validatePassword(new_password, me.username);
+    if (policyErrors.length) {
+      return res.status(400).json({ message: policyErrors.join(' ') });
+    }
+
+    // 최근 비밀번호 재사용 방지 (최근 5개)
+    const { rows: hist } = await client.query(
+      `SELECT password_hash FROM public.auth_password_history
+        WHERE member_id = $1
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT 5`,
+      [me.member_id]
+    );
+    for (const h of hist) {
+      if (await argon2.verify(h.password_hash, new_password)) {
+        return res.status(400).json({ message: '최근에 사용한 비밀번호는 다시 사용할 수 없습니다.' });
+      }
+    }
+
+    // 해시 생성
+    const hash = await argon2.hash(new_password, {
+      type: argon2.argon2id,
+      memoryCost: 19456,
+      timeCost: 2,
+      parallelism: 1,
+    });
+
+    await client.query('BEGIN');
+
+    // members 업데이트
+    await client.query(
+      `UPDATE public.members SET password = $1 WHERE member_id = $2`,
+      [hash, me.member_id]
+    );
+
+    // 비밀번호 이력 기록
+    await client.query(
+      `INSERT INTO public.auth_password_history (member_id, password_hash)
+       VALUES ($1, $2)`,
+      [me.member_id, hash]
+    );
+
+    // (선택) 기존 재설정 토큰 무효화
+    await client.query(
+      `UPDATE public.auth_password_reset
+         SET used_at = COALESCE(used_at, now()), expires_at = now()
+       WHERE member_id = $1 AND used_at IS NULL AND expires_at > now()`,
+      [me.member_id]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, message: '비밀번호가 변경되었습니다. 다시 로그인해 주세요.' });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[change-password] error:', e);
+    return res.status(500).json({ message: 'change password failed' });
+  } finally {
+    client.release();
   }
 });
 

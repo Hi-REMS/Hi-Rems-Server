@@ -66,14 +66,14 @@ function requireAuth(req, res, next) {
     const willExpireSoon = expMs - now <= 5 * 60 * 1000;
     if (willExpireSoon && res.cookie) {
       const newAccess = signAccessToken(
-        { sub: payload.sub, username: payload.username }, // ⚠️ 형식 유지
+        { sub: payload.sub, username: payload.username },
         sess
       );
       res.cookie('access_token', newAccess, cookieOpts());
     }
 
     // 요청 객체에 사용자 정보 주입
-    req.user = { id: payload.sub, username: payload.username };
+    req.user = { sub: payload.sub, username: payload.username };
     return next();
   } catch (e) {
     return res.status(401).json({ message: 'Invalid or expired token' });
