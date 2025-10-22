@@ -85,97 +85,54 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
 }
 
 /* ---------- SQL helpers (멀티별) ---------- */
+// src/energy/service.js
 async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   const params = [imei];
-  let idx = 2;
-  let condEnergy = '';
-  let condType = '';
-
-  if (energyHex) { condEnergy = `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}`; params.push(energyHex); }
-  if (typeHex)   { condType   = `AND split_part(body,' ',3) = $${idx++}`;                     params.push(typeHex);   }
+  const conds = [
+    `"rtuImei" = $1`,
+    `left(body,2)='14'`,              // cmd = 0x14
+    `split_part(body,' ',5)='00'`,    // 정상 프레임
+  ];
+  if (energyHex) { params.push(energyHex); conds.push(`split_part(body,' ',2) = $${params.length}`); }
+  if (typeHex)   { params.push(typeHex);   conds.push(`split_part(body,' ',3) = $${params.length}`); }
 
   const sql = `
-    (
-      SELECT '00' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='00' AND split_part(body,' ',5)='00'
-      ORDER BY "time" DESC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '01' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='01' AND split_part(body,' ',5)='00'
-      ORDER BY "time" DESC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '02' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='02' AND split_part(body,' ',5)='00'
-      ORDER BY "time" DESC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '03' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='03' AND split_part(body,' ',5)='00'
-      ORDER BY "time" DESC LIMIT 1
-    )
+    SELECT DISTINCT ON (split_part(body,' ',4))
+      split_part(body,' ',4) AS multi_hex, "time", body
+    FROM public.log_rtureceivelog
+    WHERE ${conds.join(' AND ')}
+    ORDER BY split_part(body,' ',4), "time" DESC
   `;
+
   const { rows } = await pool.query(sql, params);
   return rows.map(r => ({ multi_hex: r.multi_hex, time: r.time || null, body: r.body || null }));
 }
 
+
+// src/energy/service.js
 async function firstAfterPerMulti(imei, tsUtc, { energyHex=null, typeHex=null } = {}) {
   const params = [imei, tsUtc];
-  let idx = 3;
-  let condEnergy = '';
-  let condType = '';
-
-  if (energyHex) { condEnergy = `AND left(body,2)='14' AND split_part(body,' ',2) = $${idx++}`; params.push(energyHex); }
-  if (typeHex)   { condType   = `AND split_part(body,' ',3) = $${idx++}`;                     params.push(typeHex);   }
+  const conds = [
+    `"rtuImei" = $1`,
+    `"time" >= $2`,
+    `left(body,2)='14'`,
+    `split_part(body,' ',5)='00'`,
+  ];
+  if (energyHex) { params.push(energyHex); conds.push(`split_part(body,' ',2) = $${params.length}`); }
+  if (typeHex)   { params.push(typeHex);   conds.push(`split_part(body,' ',3) = $${params.length}`); }
 
   const sql = `
-    (
-      SELECT '00' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 AND "time" >= $2 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='00' AND split_part(body,' ',5)='00'
-      ORDER BY "time" ASC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '01' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 AND "time" >= $2 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='01' AND split_part(body,' ',5)='00'
-      ORDER BY "time" ASC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '02' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 AND "time" >= $2 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='02' AND split_part(body,' ',5)='00'
-      ORDER BY "time" ASC LIMIT 1
-    )
-    UNION ALL
-    (
-      SELECT '03' AS multi_hex, "time", body
-      FROM public.log_rtureceivelog
-      WHERE "rtuImei"=$1 AND "time" >= $2 ${condEnergy} ${condType}
-        AND split_part(body,' ',4)='03' AND split_part(body,' ',5)='00'
-      ORDER BY "time" ASC LIMIT 1
-    )
+    SELECT DISTINCT ON (split_part(body,' ',4))
+      split_part(body,' ',4) AS multi_hex, "time", body
+    FROM public.log_rtureceivelog
+    WHERE ${conds.join(' AND ')}
+    ORDER BY split_part(body,' ',4), "time" ASC
   `;
+
   const { rows } = await pool.query(sql, params);
   return rows.map(r => ({ multi_hex: r.multi_hex, time: r.time || null, body: r.body || null }));
 }
+
 
 /* ---------- parsing helpers ---------- */
 function headerFromHex(hex) {
