@@ -18,6 +18,7 @@ const exportMonthCsvRoutes    = require('./routes/export.monthCsv');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/user');
 const facilityRoutes = require('./routes/facility');
+const maintenanceRoutes = require('./routes/maintenance');
 
 // -------------------- 라우터 마운트 --------------------
 // 최상위
@@ -45,5 +46,5 @@ router.use('/export', exportMonthCsvRoutes);
 router.use('/auth', authRoutes);
 router.use('/user', userRoutes);
 router.use('/facility', facilityRoutes);
-
+router.use('/maintenance', maintenanceRoutes);
 module.exports = router;
