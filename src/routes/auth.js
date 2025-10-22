@@ -84,9 +84,8 @@ const forgotLimiter = rateLimit({
 });
 
 /* ─────────────────────────────────────────────────────
- * 회원가입: worker(이름), address(주소) 추가
+ * 회원가입: worker(이름), phoneNumber 추가
  * ───────────────────────────────────────────────────── */
-// routes/auth.js (수정본)
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -119,10 +118,12 @@ router.post('/register', async (req, res) => {
       timeCost: 2,
       parallelism: 1,
     });
+
+    // ★ phoneNumber는 반드시 큰따옴표로 감싸서 사용
     const { rows } = await client.query(
-      `INSERT INTO public.members (username, password, worker, phoneNumber)
+      `INSERT INTO public.members (username, password, worker, "phoneNumber")
        VALUES ($1, $2, $3, $4)
-       RETURNING member_id, username, password, worker, phoneNumber`,
+       RETURNING member_id, username, password, worker, "phoneNumber"`,
       [username, hash, worker, phoneNumber]
     );
     const user = rows[0];
@@ -139,7 +140,14 @@ router.post('/register', async (req, res) => {
     res
       .cookie('access_token', access, cookieOpts())
       .status(201)
-      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, phoneNumber: user.phoneNumber } }); // ✅ 변경
+      .json({
+        user: {
+          id: user.member_id,
+          username: user.username,
+          worker: user.worker,
+          phoneNumber: user.phoneNumber
+        }
+      });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(e);
@@ -158,8 +166,9 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(400).json({ message: 'username/password required' });
     }
 
+    // ★ phoneNumber는 따옴표, username은 LOWER 비교
     const { rows } = await pool.query(
-      'SELECT member_id, username, password, worker, phoneNumber FROM public.members WHERE username=$1',
+      'SELECT member_id, username, password, worker, "phoneNumber" FROM public.members WHERE LOWER(username)=$1',
       [String(username).trim().toLowerCase()]
     );
     const user = rows[0];
@@ -180,7 +189,14 @@ router.post('/login', loginLimiter, async (req, res) => {
     const access = signAccessToken({ sub: user.member_id, username: user.username });
     res
       .cookie('access_token', access, cookieOpts())
-      .json({ user: { id: user.member_id, username: user.username, worker: user.worker, phoneNumber: user.phoneNumber } }); // ✅ 변경
+      .json({
+        user: {
+          id: user.member_id,
+          username: user.username,
+          worker: user.worker,
+          phoneNumber: user.phoneNumber
+        }
+      });
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: 'login failed' });
@@ -191,13 +207,12 @@ router.post('/change-password', requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
     const { current_password, new_password } = req.body || {};
-    const userId = req.user?.sub;     // requireAuth 미들웨어에서 넣어주는 값 (signAccessToken의 sub)
+    const userId = req.user?.sub;
 
     if (!current_password || !new_password) {
       return res.status(400).json({ message: 'current_password/new_password required' });
     }
 
-    // 현재 사용자 조회
     const { rows } = await client.query(
       'SELECT member_id, username, password FROM public.members WHERE member_id = $1',
       [userId]
@@ -205,17 +220,14 @@ router.post('/change-password', requireAuth, async (req, res) => {
     const me = rows[0];
     if (!me) return res.status(401).json({ message: 'unauthorized' });
 
-    // 현재 비밀번호 검증
     const ok = await argon2.verify(me.password, current_password);
     if (!ok) return res.status(401).json({ message: '현재 비밀번호가 올바르지 않습니다.' });
 
-    // 정책 검사 (아이디 포함 금지 등)
     const policyErrors = validatePassword(new_password, me.username);
     if (policyErrors.length) {
       return res.status(400).json({ message: policyErrors.join(' ') });
     }
 
-    // 최근 비밀번호 재사용 방지 (최근 5개)
     const { rows: hist } = await client.query(
       `SELECT password_hash FROM public.auth_password_history
         WHERE member_id = $1
@@ -229,7 +241,6 @@ router.post('/change-password', requireAuth, async (req, res) => {
       }
     }
 
-    // 해시 생성
     const hash = await argon2.hash(new_password, {
       type: argon2.argon2id,
       memoryCost: 19456,
@@ -239,20 +250,17 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // members 업데이트
     await client.query(
       `UPDATE public.members SET password = $1 WHERE member_id = $2`,
       [hash, me.member_id]
     );
 
-    // 비밀번호 이력 기록
     await client.query(
       `INSERT INTO public.auth_password_history (member_id, password_hash)
        VALUES ($1, $2)`,
       [me.member_id, hash]
     );
 
-    // (선택) 기존 재설정 토큰 무효화
     await client.query(
       `UPDATE public.auth_password_reset
          SET used_at = COALESCE(used_at, now()), expires_at = now()
@@ -277,7 +285,6 @@ router.post('/logout', (req, res) => {
 });
 
 router.get('/me', requireAuth, (req, res) => {
-  // 미들웨어에 들어있는 최소 정보 반환(필요시 DB조회로 확장 가능)
   res.json({ user: req.user });
 });
 
@@ -349,7 +356,6 @@ ${link}
     client.release();
   }
 });
-
 
 router.post('/reset', async (req, res) => {
   const client = await pool.connect();
