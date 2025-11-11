@@ -9,15 +9,24 @@ const logsRoutes       = require('./routes/logs');
 const dashboardRoutes  = require('./routes/dashboard');
 const remsRoutes       = require('./routes/rems');
 const dbTestRoutes     = require('./db/db.routes.test');
+
 const energyRoutes        = require('./energy/service');
 const energySeriesRoutes  = require('./energy/series');
-const vilageFcstRoutes        = require('./routes/weather.vilageFcst');
-const vilageFcstByPointRoutes = require('./routes/weather.vilageFcst.byPoint');
-const asosDailyRoutes         = require('./routes/weather.asosDaily');
-const exportMonthCsvRoutes    = require('./routes/export.monthCsv');
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/user');
-const facilityRoutes = require('./routes/facility');
+
+// -------------------- 날씨 --------------------
+const omByPointRoutes = require('./routes/weather.openMeteo.byPoint');
+const omByImeiRoutes  = require('./routes/weather.openMeteo.byImei');
+const omByImeiDailyRoutes = require('./routes/weather.openMeteo.byImei.daily');
+
+const asosDailyRoutes = require('./routes/weather.asosDaily');
+
+// -------------------- 익스포트 --------------------
+const exportMonthCsvRoutes = require('./routes/export.monthCsv');
+
+// -------------------- 인증/사용자/설비/유지보수 --------------------
+const authRoutes        = require('./routes/auth');
+const userRoutes        = require('./routes/user');
+const facilityRoutes    = require('./routes/facility');
 const maintenanceRoutes = require('./routes/maintenance');
 
 // -------------------- 라우터 마운트 --------------------
@@ -31,20 +40,23 @@ router.use('/logs',        logsRoutes);
 router.use('/dashboard',   dashboardRoutes);
 router.use('/rems',        remsRoutes);
 
-// 날씨
-router.use('/weather/vilageFcst', vilageFcstRoutes);
-router.use('/weather/vilageFcst', vilageFcstByPointRoutes);
-router.use('/weather/asos',       asosDailyRoutes);
+// === 날씨 ===
+router.use('/weather/openmeteo', omByPointRoutes); // /api/weather/openmeteo/by-point
+router.use('/weather/openmeteo', omByImeiRoutes);  // /api/weather/openmeteo/by-imei
+router.use('/weather/openmeteo', omByImeiDailyRoutes);
+router.use('/weather/asos', asosDailyRoutes);
 
-// 에너지
-router.use('/energy/electric', energySeriesRoutes);
-router.use('/energy',          energyRoutes);
+// === 에너지 ===
+router.use('/energy', energySeriesRoutes);
+router.use('/energy', energyRoutes);
 
-// 익스포트
+// === 익스포트 ===
 router.use('/export', exportMonthCsvRoutes);
 
-router.use('/auth', authRoutes);
-router.use('/user', userRoutes);
-router.use('/facility', facilityRoutes);
+// === 인증/사용자/설비/유지보수 ===
+router.use('/auth',        authRoutes);
+router.use('/user',        userRoutes);
+router.use('/facility',    facilityRoutes);
 router.use('/maintenance', maintenanceRoutes);
+
 module.exports = router;

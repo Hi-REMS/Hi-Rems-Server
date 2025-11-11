@@ -1,11 +1,3 @@
-// src/app.js
-// Express 서버 진입점
-// - 환경변수 로딩(dotenv)
-// - JSON 파서, CORS 설정
-// - /api 라우트 마운트
-// - 헬스체크 및 오류 핸들러
-// 실행: node src/app.js (또는 npm start)
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -13,17 +5,17 @@ const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const api = require('./api');
 const path = require('path');
-const { setupEnergyCron } = require(path.join(__dirname, './jobs/energyRefresh'));
-
+const fs = require('fs');
+const { setupEnergyCron } = require('./jobs/energyRefresh');
+const { getNormalPointsCached } = require('./jobs/normalPointCache');
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
-
-// 프록시(Nginx/Cloudflare 등) 뒤에서 실제 클라이언트 IP 인식
 app.set('trust proxy', 1);
 
-// -------------------- CORS 설정 --------------------
+// ──────────────────────────────────────────────
+// ✅ CORS 설정 (부분매칭 허용)
 const whitelist = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
@@ -31,32 +23,34 @@ const whitelist = (process.env.CORS_ORIGIN || '')
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // 서버-서버/CLI 요청 허용
-    if (!whitelist.length || whitelist.includes(origin)) return cb(null, true);
-    cb(new Error('Not allowed by CORS'));
+    if (!origin) return cb(null, true);
+    const allowed = whitelist.some(w => origin.startsWith(w));
+    if (allowed) return cb(null, true);
+    cb(new Error(`CORS blocked: ${origin}`));
   },
   credentials: true,
 }));
 
-// -------------------- 헬스 체크 --------------------
+// ──────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, uptime: process.uptime() });
 });
 
-// 전역 기본 제한 (모든 엔드포인트에 적용)
+// 글로벌 요청 제한
 const globalLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1분
-  max: 200,            // 1분당 최대 200요청
+  windowMs: 60 * 1000,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => (req.path || '') === '/api/health-direct',
 });
 app.use(globalLimiter);
 
-// -------------------- 라우트 마운트 --------------------
-app.use('/api', api); // 모든 /api/* 요청을 src/api.js로 위임
+// ──────────────────────────────────────────────
+// API
+app.use('/api', api);
 
-// -------------------- 임시 헬스체크 (직접 DB쿼리) --------------------
+// DB health
 app.get('/api/health-direct', async (_req, res) => {
   try {
     const { pool } = require('./db/db.pg');
@@ -67,16 +61,46 @@ app.get('/api/health-direct', async (_req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────
+// 크론잡
 setupEnergyCron();
 
-// -------------------- 오류 핸들러 --------------------
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Server Error' });
+// ✅ 정상 발전소 데이터 프리로드
+const dist = path.join(__dirname, '../frontend/dist');
+app.get(/^\/(?!api\/).*/, async (req, res, next) => {
+  try {
+    let normalPoints = [];
+    try {
+      normalPoints = await getNormalPointsCached();
+    } catch (err) {
+      console.warn('[WARN] Failed to load normalPoints cache:', err.message);
+    }
+
+    const htmlPath = path.join(dist, 'index.html');
+    let html = fs.readFileSync(htmlPath, 'utf8');
+    const preloadScript = `<script>window.__NORMAL_POINTS__=${JSON.stringify(normalPoints)};</script>`;
+    html = html.replace('<!--__PRELOAD_NORMAL_POINTS__-->', preloadScript);
+
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('html').send(html);
+  } catch (err) {
+    next(err);
+  }
 });
 
-// -------------------- 서버 시작 --------------------
+// ──────────────────────────────────────────────
+// 오류 핸들러
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  const status = err.status || 500;
+  const body = { error: err.message || 'Server Error' };
+  if (status === 422 && Array.isArray(err.matches)) body.matches = err.matches;
+  res.status(status).json(body);
+});
+
+// ──────────────────────────────────────────────
+// 서버 시작
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => {
-  console.log(`API listening on http://127.0.0.1:${port}`);
+  console.log(`🚀 API listening on port ${port} (env: ${process.env.NODE_ENV})`);
 });

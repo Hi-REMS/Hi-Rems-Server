@@ -17,7 +17,7 @@ function cookieOpts() {
 
 /**
  * AccessToken 발급함수
- * @param {{ sub: string|number, username: string }} payload  // ⚠️ sub, username 필수
+ * @param {{ sub: string|number, username: string }} payload
  * @param {number=} sess  // 최초 로그인 시각(ms). 슬라이딩 갱신 시 유지
  */
 function signAccessToken(payload, sess) {

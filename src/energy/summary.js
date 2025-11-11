@@ -97,7 +97,8 @@ const PG_ELECTRIC_AGG = `
 ${BASE_PARSE},
 pv_single AS (
   SELECT ts, imei, multi,
-         ${U64_BE('data_off + 18')} AS cum_wh
+         /* FIX: 단상 누적Wh 오프셋을 data_off + 16 으로 사용 (파서와 일치) */
+         ${U64_BE('data_off + 16')} AS cum_wh
   FROM hdr
   WHERE err=0 AND energy=1 AND type=1 AND len >= data_off+26
 ),
@@ -120,7 +121,7 @@ SELECT
 FROM per_dev;
 `;
 
-// 열: fallback은 이미 kWh 산출
+// 열: fallback은 이미 kWh 산출 (kcal → kWh 변환)
 const PG_THERMAL_AGG = `
 ${BASE_PARSE},
 th AS (

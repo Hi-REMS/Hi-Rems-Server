@@ -99,7 +99,7 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'username/password/worker/phoneNumber required' });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username)) {
-      return res.status(400).json({ message: 'invalid email format' });
+      return res.status(400).json({ message: '이메일 형식이 올바르지 않습니다.' });
     }
 
     const { rows: dup } = await client.query(
@@ -107,7 +107,7 @@ router.post('/register', async (req, res) => {
       [username]
     );
     if (dup.length) {
-      return res.status(409).json({ message: 'username already exists' });
+      return res.status(409).json({ message: '이메일이 존재합니다' });
     }
 
     await client.query('BEGIN');
@@ -151,7 +151,7 @@ router.post('/register', async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(e);
-    res.status(500).json({ message: 'register failed' });
+    res.status(500).json({ message: '회원가입에 실패하였습니다' });
   } finally {
     client.release();
   }

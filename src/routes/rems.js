@@ -7,6 +7,7 @@ const router = express.Router();
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const { mysqlPool } = require('../db/db.mysql');
+const { pool: pg } = require('../db/db.pg'); 
 
 // ---------------------
 // Rate limiters
@@ -37,34 +38,70 @@ router.get('/kakao-jskey', limiterKey, (_req, res) => {
 });
 
 // =====================
-// 카카오 로컬 지오코딩 프록시(REST 키 사용)
+// 카카오 로컬 지오코딩 프록시(REST 키 사용, 상세주소 포함)
 // =====================
 router.get('/geocode', limiterGeocode, async (req, res, next) => {
   try {
     const query = (req.query.query || '').trim();
+    console.log('[GEOCODE] query =', query);
     if (!query) return res.status(400).json({ error: 'query is required' });
-    if (query.length > 100) return res.status(400).json({ error: 'query too long' }); // 간단한 남용 방지
 
     const REST_KEY = process.env.KAKAO_REST_KEY || '';
     if (!REST_KEY) return res.status(500).json({ error: 'KAKAO_REST_KEY is not configured' });
 
-    const url = 'https://dapi.kakao.com/v2/local/search/address.json';
-    const resp = await axios.get(url, {
+    const addrUrl = 'https://dapi.kakao.com/v2/local/search/address.json';
+    const coordUrl = 'https://dapi.kakao.com/v2/local/geo/coord2address.json';
+
+    // ✅ 1단계: 주소 → 좌표 변환
+    const addrResp = await axios.get(addrUrl, {
       params: { query },
       headers: { Authorization: `KakaoAK ${REST_KEY}` },
       timeout: 7000,
+      validateStatus: () => true,
     });
 
-    const docs = Array.isArray(resp.data?.documents) ? resp.data.documents : [];
-    const results = docs.map(d => ({
-      address_name: d.address_name,
-      x: parseFloat(d.x), // lng
-      y: parseFloat(d.y), // lat
-    }));
+    const doc = addrResp.data?.documents?.[0];
+    if (!doc) return res.status(404).json({ error: 'no address found' });
 
-    res.json({ results });
-  } catch (e) { next(e); }
+    const { x, y } = doc;
+    let detailAddr = null;
+
+    // ✅ 2단계: 좌표 → 상세주소 역변환
+    try {
+      const coordResp = await axios.get(coordUrl, {
+        params: { x, y },
+        headers: { Authorization: `KakaoAK ${REST_KEY}` },
+        timeout: 7000,
+        validateStatus: () => true,
+      });
+
+      detailAddr = coordResp.data?.documents?.[0]?.address ||
+                   coordResp.data?.documents?.[0]?.road_address ||
+                   null;
+    } catch (err) {
+      console.warn('[coord2address] fallback failed:', err.message);
+    }
+
+    // ✅ 3단계: 결과 병합
+    const result = {
+      query,
+      address_name: detailAddr?.address_name || doc.address_name,
+      region_1depth_name: detailAddr?.region_1depth_name || doc.address?.region_1depth_name,
+      region_2depth_name: detailAddr?.region_2depth_name || doc.address?.region_2depth_name,
+      region_3depth_name: detailAddr?.region_3depth_name || doc.address?.region_3depth_name,
+      road_name: detailAddr?.road_name || doc.road_address?.road_name,
+      building_name: detailAddr?.building_name || doc.road_address?.building_name,
+      zone_no: detailAddr?.zone_no || doc.road_address?.zone_no,
+      x: parseFloat(x),
+      y: parseFloat(y),
+    };
+
+    res.json({ results: [result] });
+  } catch (e) {
+    next(e);
+  }
 });
+
 
 /**
  * GET /api/rems
@@ -182,5 +219,6 @@ router.get('/agg/sigungu', limiterAggSigu, async (req, res, next) => {
     res.json(rows.map(r => ({ name: r.name || '기타/미상', count: Number(r.count) })));
   } catch (e) { next(e); }
 });
+
 
 module.exports = router;

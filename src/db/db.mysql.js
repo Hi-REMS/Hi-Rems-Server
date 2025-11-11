@@ -1,7 +1,8 @@
 /*
-커넥션 풀 생성하는 모듈, Promise 기반 API로 await를 써서 query, getConnetion 등을 호출
+커넥션 풀 생성하는 모듈, Promise 기반 API로 await를 써서 query, getConnection 등을 호출
 */
 const mysql = require('mysql2/promise');
+require('dotenv').config(); // ✅ .env 파일 로드
 
 /*
 환경변수 불러오기
@@ -20,14 +21,18 @@ const {
 
 /*
 커넥션 풀 생성
+- host가 지정되지 않으면 localhost → socket 모드로 연결돼 ECONNREFUSED 발생 가능
+- 따라서 host 기본값을 127.0.0.1로 강제
 */
 const mysqlPool = mysql.createPool({
-  host: MYSQL_HOST,
-  port: Number(MYSQL_PORT),
-  user: MYSQL_USER,
-  password: MYSQL_PASS,
-  database: MYSQL_DB,
-  connectionLimit: Number(MYSQL_CONN_LIMIT),
+  host: MYSQL_HOST || '127.0.0.1', // ✅ localhost 대신 127.0.0.1로 강제 (TCP)
+  port: Number(MYSQL_PORT) || 3307,
+  user: MYSQL_USER || 'root',
+  password: MYSQL_PASS || '',
+  database: MYSQL_DB || 'rems',
+  connectionLimit: Number(MYSQL_CONN_LIMIT) || 10,
+  waitForConnections: true,
+  ssl: MYSQL_SSL === 'true' ? { rejectUnauthorized: true } : undefined, // 옵션 SSL
 });
 
 /*
