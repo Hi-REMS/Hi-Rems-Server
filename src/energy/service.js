@@ -26,8 +26,19 @@ const ELECTRIC_CO2 = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.4747'); // kg
 const THERMAL_CO2  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198');  // kg/kWh
 const TREE_CO2_KG  = 6.6;
 
-const RECENT_WINDOW_DAYS = Number(process.env.RECENT_WINDOW_DAYS || '14'); // 최신 조회 하한
-const RECENT_SQL = `"time" >= (now() - interval '${RECENT_WINDOW_DAYS} days')`;
+const RECENT_WINDOW_BY_ENERGY = {
+  '01': 14,  // 태양광
+  '02': 7,   // 태양열
+  '03': 7,   // 지열
+  '04': 14,  // 풍력
+  '06': 14,  // 연료전지
+  '07': 14,  // ESS
+};
+
+function recentSqlFor(energyHex) {
+  const days = RECENT_WINDOW_BY_ENERGY[energyHex] || 14;
+  return `"time" >= (now() - interval '${days} days')`;
+}
 
 // CO₂ 계수: 태양열/지열 → 열 계수, 그 외 → 전기 계수
 const CO2_FOR = (energyHex) => {
@@ -106,7 +117,7 @@ async function lastBeforeNow(imei, energyHex = null, typeHex = null) {
   const params = [imei];
   const conds = [
     `"rtuImei" = $1`,
-    RECENT_SQL,   // ✅ 최근 N일 하한
+    recentSqlFor(energyHex),
     CMD_IS_14,
     ERR_EQ_OK,
     LEN_WITH_WH_COND,
@@ -130,7 +141,7 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
   const params = [imei];
   const conds = [
     `"rtuImei" = $1`,
-    RECENT_SQL,   // ✅ 최근 N일 하한
+    recentSqlFor(energyHex),
     CMD_IS_14,
     ERR_EQ_OK,
     LEN_WITH_WH_COND,
@@ -155,7 +166,7 @@ async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   const params = [imei];
   const conds = [
     `"rtuImei" = $1`,
-    RECENT_SQL,   // ✅ 최근 N일 하한
+    recentSqlFor(energyHex),
     CMD_IS_14,
     ERR_EQ_OK,
     LEN_WITH_WH_COND,
@@ -311,7 +322,7 @@ async function handleKPI(req, res, next, defaultEnergyHex = '01') {
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
 
-    const energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex   = (req.query.type   || '').toLowerCase() || null;
     const multiHexQ = (req.query.multi  || '').toLowerCase() || null;
     const selectedMulti =
@@ -439,7 +450,7 @@ async function handleKPI(req, res, next, defaultEnergyHex = '01') {
         energy_hex: energyHex,
         type_hex: typeHex,
         multi: selectedMulti || 'all',
-        recent_window_days: RECENT_WINDOW_DAYS,
+        recent_window_days: RECENT_WINDOW_BY_ENERGY[energyHex] || 14,
       }
     });
   } catch (e) {
@@ -454,8 +465,7 @@ async function handlePreview(req, res, next, defaultEnergyHex = '') {
     let limit = Math.min(parseInt(req.query.limit || '200', 10), 2000);
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
-
-    const energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex   = (req.query.type   || '').toLowerCase();
     const onlyOk    = String(req.query.ok || '') === '1';
     const multiHex  = (req.query.multi  || '').toLowerCase();
@@ -509,7 +519,8 @@ async function handleDebug(req, res, next, defaultEnergyHex = '') {
     if (!q) return res.status(400).json({ error: 'rtuImei/imei/name/q is required' });
     const imei = await resolveOneImeiOrThrow(q);
 
-    const energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+
     const typeHex   = (req.query.type   || '').toLowerCase();
     const okParam   = String(req.query.ok || ''); // '', '1'|'true', 'any'
     let errCond = null;
@@ -578,7 +589,8 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
 
-    const energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+
     const typeHex   = (req.query.type   || '').toLowerCase() || null;
     const multiHex  = (req.query.multi  || '').toLowerCase() || null;
 
@@ -702,7 +714,8 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
 
-    const energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+
     const typeHex   = (req.query.type   || '').toLowerCase() || null;
 
     const rows = await latestPerMulti(imei, { energyHex, typeHex });
@@ -809,7 +822,8 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
 
-    const energyHex  = (req.query.energy || defaultEnergyHex).toLowerCase(); // '01'|'02'|'03'|'04'|'06'|'07'
+let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+
     const typeHexRaw = (req.query.type || '').toLowerCase();
     const typeHex    = typeHexRaw || null;
     const multiHex   = (req.query.multi || '').toLowerCase();

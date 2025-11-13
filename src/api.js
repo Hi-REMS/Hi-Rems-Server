@@ -29,6 +29,8 @@ const userRoutes        = require('./routes/user');
 const facilityRoutes    = require('./routes/facility');
 const maintenanceRoutes = require('./routes/maintenance');
 
+const membersRoutes     = require('./routes/members');
+const facilityUploadRoutes = require('./routes/facility.upload');
 // -------------------- 라우터 마운트 --------------------
 // 최상위
 router.use('/health', healthRoutes);
@@ -57,6 +59,8 @@ router.use('/export', exportMonthCsvRoutes);
 router.use('/auth',        authRoutes);
 router.use('/user',        userRoutes);
 router.use('/facility',    facilityRoutes);
+router.use('/facility', facilityUploadRoutes);
 router.use('/maintenance', maintenanceRoutes);
 
+router.use('/members',     membersRoutes);
 module.exports = router;

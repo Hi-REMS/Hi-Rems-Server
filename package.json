@@ -24,6 +24,7 @@
     "jsonwebtoken": "^9.0.2",
     "lru-cache": "^10.4.3",
     "luxon": "^3.7.1",
+    "multer": "^2.0.2",
     "mysql2": "^3.14.3",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.9",

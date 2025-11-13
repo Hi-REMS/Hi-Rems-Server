@@ -1,8 +1,4 @@
 // src/db/db.routes.test.js
-// DB 연결 테스트 라우트 모듈
-// - PostgreSQL 연결 확인 (/ping-db)
-// - MySQL/MariaDB 연결 확인 (/ping-mysql)
-// - 실제 서비스 라우터와는 별도로 DB 연결 상태를 점검하거나 개발/테스트용으로 사용
 
 const express = require('express');
 const router = express.Router();
