@@ -17,6 +17,7 @@ const energySeriesRoutes  = require('./energy/series');
 const omByPointRoutes = require('./routes/weather.openMeteo.byPoint');
 const omByImeiRoutes  = require('./routes/weather.openMeteo.byImei');
 const omByImeiDailyRoutes = require('./routes/weather.openMeteo.byImei.daily');
+const weatherMonthlyRoutes = require('./routes/weather.monthly');
 
 const asosDailyRoutes = require('./routes/weather.asosDaily');
 
@@ -47,6 +48,7 @@ router.use('/weather/openmeteo', omByPointRoutes); // /api/weather/openmeteo/by-
 router.use('/weather/openmeteo', omByImeiRoutes);  // /api/weather/openmeteo/by-imei
 router.use('/weather/openmeteo', omByImeiDailyRoutes);
 router.use('/weather/asos', asosDailyRoutes);
+router.use('/weather', weatherMonthlyRoutes);
 
 // === 에너지 ===
 router.use('/energy', energySeriesRoutes);

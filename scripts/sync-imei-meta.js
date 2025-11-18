@@ -1,6 +1,7 @@
 // scripts/sync-imei-meta.js
 require('dotenv').config();
 
+const { parseFrame } = require('../src/energy/parser');
 const axios = require('axios').create({
   timeout: 12000,
   validateStatus: () => true,
@@ -9,6 +10,35 @@ const axios = require('axios').create({
 const { pool } = require('../src/db/db.pg');
 const { mysqlPool } = require('../src/db/db.mysql');
 
+// ============================================================
+// 1) IMEI에서 최신 frame 읽어서 energy/type/multi 추출
+// ============================================================
+async function detectEnergyTypeMulti(imei) {
+  const sql = `
+    SELECT body
+    FROM public.log_rtureceivelog
+    WHERE "rtuImei" = $1
+      AND left(body,2) = '14'
+      AND split_part(body, ' ', 5) = '00'
+    ORDER BY "time" DESC
+    LIMIT 1
+  `;
+  const { rows } = await pool.query(sql, [imei]);
+  if (!rows.length) return null;
+
+  const p = parseFrame(rows[0].body);
+  if (!p?.ok) return null;
+
+  return {
+    energyHex: p.energy.toString(16).padStart(2, '0'),
+    typeHex: p.type.toString(16).padStart(2, '0'),
+    multiCount: p.multi || 1
+  };
+}
+
+// ============================================================
+// 2) 지역 파싱 / 지오코딩
+// ============================================================
 function normalizeSido(sido) {
   const map = {
     '강원특별자치도': '강원도',
@@ -60,34 +90,62 @@ async function geocodeViaKakao(address) {
   return { lat: Number(doc.y) || null, lon: Number(doc.x) || null };
 }
 
+// ============================================================
+// 3) PostgreSQL imei_meta UPSERT
+// ============================================================
 async function upsertImeiMeta(pgPool, row) {
   const q = `
-    INSERT INTO public.imei_meta(imei, address, sido, sigungu, lat, lon, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, now())
-    ON CONFLICT (imei) DO UPDATE SET
-      address = EXCLUDED.address,
-      sido = EXCLUDED.sido,
-      sigungu = EXCLUDED.sigungu,
-      lat = COALESCE(EXCLUDED.lat, public.imei_meta.lat),
-      lon = COALESCE(EXCLUDED.lon, public.imei_meta.lon),
-      updated_at = now()
+INSERT INTO public.imei_meta(
+  imei, address, sido, sigungu, lat, lon,
+  energy_hex, type_hex, multi_count,
+  worker,
+  updated_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+ON CONFLICT (imei) DO UPDATE SET
+  address = EXCLUDED.address,
+  sido = EXCLUDED.sido,
+  sigungu = EXCLUDED.sigungu,
+  lat = COALESCE(EXCLUDED.lat, public.imei_meta.lat),
+  lon = COALESCE(EXCLUDED.lon, public.imei_meta.lon),
+  energy_hex = EXCLUDED.energy_hex,
+  type_hex = EXCLUDED.type_hex,
+  multi_count = EXCLUDED.multi_count,
+  worker = EXCLUDED.worker,
+  updated_at = now()
   `;
-  const args = [row.imei, row.address, row.sido, row.sigungu, row.lat, row.lon];
+const args = [
+  row.imei,
+  row.address,
+  row.sido,
+  row.sigungu,
+  row.lat,
+  row.lon,
+  row.energyHex,
+  row.typeHex,
+  row.multiCount,
+  row.worker
+];
   await pgPool.query(q, args);
 }
 
+// ============================================================
+// 4) MAIN SYNC PROCESS
+// ============================================================
 (async () => {
   try {
     console.log('▶ IMEI 메타 동기화 시작');
 
+    // MySQL에서 주소 읽기
     const sql = `
       SELECT
-        rtu.rtuImei AS imei,
-        COALESCE(rems.address, '') AS address
-      FROM rtu_rtu AS rtu
-      LEFT JOIN rems_rems AS rems
-        ON rems.rtu_id = rtu.id
-      WHERE COALESCE(rems.address, '') <> ''
+  rtu.rtuImei AS imei,
+  COALESCE(rems.address, '') AS address,
+  rems.worker AS worker
+FROM rtu_rtu AS rtu
+LEFT JOIN rems_rems AS rems
+  ON rems.rtu_id = rtu.id
+WHERE COALESCE(rems.address, '') <> '';
     `;
     const [rows] = await mysqlPool.query(sql);
     console.log(`  - MySQL에서 주소 보유 IMEI ${rows.length}건`);
@@ -116,6 +174,7 @@ async function upsertImeiMeta(pgPool, row) {
           let lat = meta?.lat ?? null;
           let lon = meta?.lon ?? null;
 
+          // 지오코딩 필요 시
           if (lat == null || lon == null) {
             try {
               const p = useKakaoDirect
@@ -125,27 +184,48 @@ async function upsertImeiMeta(pgPool, row) {
               lon = p.lon;
               if (lat != null && lon != null) geocoded++;
               await new Promise(r => setTimeout(r, 120));
-            } catch (err) {
-            }
+            } catch (err) {}
           }
 
-          await upsertImeiMeta(pool, { imei, address, sido, sigungu, lat, lon });
+          // ⭐ 최신 RTU 프레임에서 energy/type/multi 자동 감지
+          let energyInfo = null;
+          try {
+            energyInfo = await detectEnergyTypeMulti(imei);
+          } catch (err) {
+            energyInfo = null;
+          }
+
+          await upsertImeiMeta(pool, {
+            imei,
+            address,
+            sido,
+            sigungu,
+            lat,
+            lon,
+            energyHex: energyInfo?.energyHex || null,
+            typeHex: energyInfo?.typeHex || null,
+            multiCount: energyInfo?.multiCount || 1,
+            worker: src.worker || null
+          });
+
           processed++;
         })());
 
+        // 동시성 limit
         if (queue.length >= concurrency) {
           await Promise.race(queue);
-          for (let k = queue.length - 1; k >= 0; k--) {
-            if (queue[k].isFulfilled || queue[k].isRejected) queue.splice(k, 1);
-          }
         }
       }
+
       await Promise.allSettled(queue);
-      console.log(`  - 진행 ${Math.min(i + batch.length, rows.length)}/${rows.length} (누적 UPSERT ${processed}, 지오코딩 ${geocoded})`);
+      console.log(
+        `  - 진행 ${Math.min(i + batch.length, rows.length)}/${rows.length} (UPSERT ${processed}, 지오코딩 ${geocoded})`
+      );
     }
 
     console.log('✅ 완료:', { processed, geocoded });
     process.exit(0);
+
   } catch (e) {
     console.error('❌ 실패:', e);
     process.exit(1);

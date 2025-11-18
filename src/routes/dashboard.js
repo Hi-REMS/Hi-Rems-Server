@@ -638,14 +638,12 @@ router.get('/energy', limiterEnergy, async (_req, res, next) => {
 // - sido/sigungu 필터 지원
 router.get('/abnormal/points', async (req, res, next) => {
   try {
-    // 운영 초반엔 넉넉히 보는 게 안전
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90',  10), 10);
     const reasonFilter = String(req.query.reason || 'ALL').toUpperCase();
     const filterSido   = (req.query.sido    || '').trim();
     const filterSigungu= (req.query.sigungu || '').trim();
 
-    // 1) 최신 상태 (fault 컬럼 유무에 따라 자동 폴백)
     const withFaultSql = `
       ${latestStatusCteWithFault()}
       SELECT
@@ -662,6 +660,7 @@ router.get('/abnormal/points', async (req, res, next) => {
         END AS reason
       FROM recent_latest r
     `;
+
     const noFaultSql = `
       ${latestStatusCteNoFault()}
       SELECT
@@ -685,68 +684,76 @@ router.get('/abnormal/points', async (req, res, next) => {
       ({ rows: baseRows } = await pool.query(noFaultSql,   [lookbackDays, offlineMin]));
     }
 
-    // NORMAL 제외 + reason 필터
     let rows = baseRows.filter(r => r.reason !== 'NORMAL');
     if (reasonFilter !== 'ALL') rows = rows.filter(r => r.reason === reasonFilter);
 
     if (!rows.length) return res.json({ ok: true, items: [] });
 
-    // 2) 주소/좌표 매핑 (Postgres imei_meta 우선) — 배열 바인딩으로 안전하게
+    // ▼ imei_meta 조회 (worker 포함)
     const imeis = rows.map(r => r.imei);
     let metaMap = new Map();
+
     try {
       const { rows: metas } = await pool.query(
-        `SELECT imei, address, sido, sigungu, lat, lon
-           FROM public.imei_meta
-          WHERE imei = ANY($1::text[])`,
+        `SELECT imei, address, sido, sigungu, lat, lon,
+                energy_hex, type_hex, multi_count,
+                worker
+         FROM public.imei_meta
+         WHERE imei = ANY($1::text[])`,
         [imeis]
       );
       metaMap = new Map(metas.map(m => [m.imei, m]));
-    } catch {
-      // imei_meta 테이블이 없을 수도 있음 → 조용히 패스
-    }
+    } catch {}
 
-    // 3) MySQL 보강 (주소 누락분만 조회)
+    // ▼ MySQL에서 주소/worker 보강
     if (mysqlPool) {
       const lacks = rows.filter(r => {
         const meta = metaMap.get(r.imei);
         return !meta || !meta.address;
       });
-      // 배치 처리
+
       const CHUNK = 500;
       for (let i = 0; i < lacks.length; i += CHUNK) {
         const batchImeis = lacks.slice(i, i + CHUNK).map(r => r.imei);
         if (!batchImeis.length) break;
 
-        const placeholders = batchImeis.map(() => '?').join(',');
         const sql = `
           SELECT
             COALESCE(rtu.rtuImei, rems.rtu_id) AS imei,
-            COALESCE(rems.address, '')         AS address
+            COALESCE(rems.address, '') AS address,
+            rems.worker AS worker
           FROM rems_rems AS rems
           LEFT JOIN rtu_rtu AS rtu
             ON rtu.id = rems.rtu_id
-          WHERE rtu.rtuImei IN (${placeholders})
-             OR rems.rtu_id  IN (${placeholders})
+          WHERE rtu.rtuImei IN (${batchImeis.map(()=>'?').join(',')})
+             OR rems.rtu_id  IN (${batchImeis.map(()=>'?').join(',')})
         `;
+
         const [mrows] = await mysqlPool.query(sql, [...batchImeis, ...batchImeis]);
 
         for (const m of mrows) {
           const { sido, sigungu } = parseKoreanAddress(m.address || '');
+          const existing = metaMap.get(m.imei) || {};
           metaMap.set(m.imei, {
+            ...existing,
             imei: m.imei,
             address: m.address || '',
+            worker: m.worker || existing.worker || null,
             sido,
             sigungu,
-            lat: null,
-            lon: null,
+            lat: existing.lat ?? null,
+            lon: existing.lon ?? null,
+            energy_hex: existing.energy_hex ?? null,
+            type_hex:   existing.type_hex   ?? null,
+            multi_count: existing.multi_count ?? null,
           });
         }
       }
     }
 
-    // 4) 지역 필터(sido/sigungu) 적용 + 결과 구성
-    const norm = s => (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
+    const norm = s =>
+      (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
+
     const wantSido = filterSido ? norm(normalizeSido(filterSido)) : null;
     const wantSigun = filterSigungu ? norm(filterSigungu) : null;
 
@@ -765,11 +772,21 @@ router.get('/abnormal/points', async (req, res, next) => {
         op_mode: r.op_mode,
         last_time: r.last_time,
         minutes_since: Number(r.minutes_since?.toFixed?.(1) ?? r.minutes_since),
+
+        // 주소/좌표
         sido,
         sigungu,
         address: meta.address || '',
         lat: meta.lat ?? null,
-        lon: meta.lon ?? null, // 좌표 없으면 프론트에서 /rems/geocode로 보완
+        lon: meta.lon ?? null,
+
+        // ▼ worker 추가
+        worker: meta.worker || null,
+
+        // 에너지 관련
+        energy: meta.energy_hex ?? null,
+        type: meta.type_hex ?? null,
+        multi: meta.multi_count ?? null
       });
     }
 
@@ -782,13 +799,12 @@ router.get('/abnormal/points', async (req, res, next) => {
 
 
 
+
+
 router.get('/normal/points', async (req, res) => {
   try {
     const lookbackDays = Number(req.query.lookbackDays || 3);
 
-    // ───────────────────────────────────────────────
-    // 1️⃣ 최신 정상 발전소만 조회 (최근 N일 이내)
-    // ───────────────────────────────────────────────
     const sql = `
       WITH latest AS (
         SELECT DISTINCT ON (r."rtuImei")
@@ -799,42 +815,69 @@ router.get('/normal/points', async (req, res) => {
         WHERE r."time" >= NOW() - make_interval(days => $1)
         ORDER BY r."rtuImei", r."time" DESC
       )
-      SELECT l.imei, l."opMode" AS op_mode, l.last_time,
-             m.sido, m.sigungu, m.address, m.lat, m.lon
+      SELECT 
+        l.imei, 
+        l."opMode" AS op_mode, 
+        l.last_time,
+
+        -- ▼ worker 포함!
+        m.sido, 
+        m.sigungu, 
+        m.address, 
+        m.lat, 
+        m.lon,
+        m.energy_hex,
+        m.type_hex,
+        m.multi_count,
+        m.worker
+
       FROM latest l
       LEFT JOIN public.imei_meta m ON m.imei = l.imei
       WHERE l."opMode" = '0'
       ORDER BY l.last_time DESC;
     `;
+
     const { rows } = await pool.query(sql, [lookbackDays]);
 
-    // ───────────────────────────────────────────────
-    // 2️⃣ 좌표(lat/lon)가 있는 항목만 즉시 응답
-    // ───────────────────────────────────────────────
-    const items = rows.filter(r => r.lat && r.lon);
+    const items = rows
+      .filter(r => r.lat && r.lon)
+      .map(r => ({
+        imei: r.imei,
+        op_mode: r.op_mode,
+        last_time: r.last_time,
+        sido: r.sido,
+        sigungu: r.sigungu,
+        address: r.address,
+        lat: r.lat,
+        lon: r.lon,
+
+        // ▼ worker 추가
+        worker: r.worker || null,
+
+        energy: r.energy_hex ?? null,
+        type: r.type_hex ?? null,
+        multi: r.multi_count ?? null
+      }));
+
     const pending = rows.length - items.length;
 
-    // ✅ 즉시 응답 (프론트는 이걸 바로 받아서 표시함)
     res.json({ ok: true, items, pending });
 
-    // ───────────────────────────────────────────────
-    // 3️⃣ 좌표 없는 IMEI → 백그라운드 비동기 갱신
-    // ───────────────────────────────────────────────
+    // 좌표 없는 애들 기존 로직 유지
     const noCoords = rows.filter(r => !r.lat || !r.lon);
     if (noCoords.length > 0) {
       console.log(`🛰️ Found ${noCoords.length} normal points without coords — background sync start...`);
 
-      // ⚡ 프론트 응답 끝난 뒤 2초 후 백그라운드 작업 시작
       setTimeout(async () => {
-try {
-  if (typeof syncLatLon === 'function') {
-    await syncLatLon();         // 원래 의도대로 함수일 때만 수행
-  } else {
-    console.warn('syncLatLon not available; skip background sync');
-  }
-} catch (e) {
-  console.error('❌ Background syncLatLon() error:', e);
-}
+        try {
+          if (typeof syncLatLon === 'function') {
+            await syncLatLon();
+          } else {
+            console.warn('syncLatLon not available; skip background sync');
+          }
+        } catch (e) {
+          console.error('❌ Background syncLatLon() error:', e);
+        }
       }, 2000);
     }
   } catch (err) {
@@ -842,6 +885,8 @@ try {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+
 
 
 
