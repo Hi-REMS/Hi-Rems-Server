@@ -11,10 +11,6 @@ const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
 
-// ---------------------
-// Rate limiter
-// ---------------------
-// 1분에 40회로 제한
 const ordersLimiter = rateLimit({
   windowMs: 60 * 1000, 
   max: 40,            
@@ -23,26 +19,16 @@ const ordersLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/**
- * GET /api/orders
- * - 주문 목록을 조회
- * - 쿼리스트링:
- *   • limit (기본 50, 최대 200)
- *   • offset (기본 0)
- */
+
 router.get('/', ordersLimiter, async (req, res, next) => {
   try {
-    // --- 파라미터 처리 ---
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
     const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);
-
-    // --- SQL 실행 ---
     const { rows } = await pool.query(
       'SELECT id, product, qty, status FROM orders ORDER BY id DESC LIMIT $1 OFFSET $2',
       [limit, offset]
     );
 
-    // --- 응답 ---
     res.json(rows);
   } catch (e) {
     next(e);

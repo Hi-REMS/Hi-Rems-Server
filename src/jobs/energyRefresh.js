@@ -1,21 +1,21 @@
 /**
  * energyRefresh.js
  * ─────────────────────────────────────────────────────────────
- * ⏰ 전국 에너지 요약 캐시 자동 갱신 작업
+ * 전국 에너지 요약 캐시 자동 갱신 작업
  * - node-cron을 이용해 1분마다 전국 전기/열 에너지 데이터를 재계산
  * - 최초 서버 부팅 시 1회 즉시 수행
  * - 계산된 결과는 memoryCache에 저장하며, 필요 시 DB에도 영속화
  *
- * 🧩 주요 기능
+ * 주요 기능
  * - getElectricNationwideSummary / getThermalNationwideSummary 호출로 집계 수행
  * - memoryCache: API 응답 시 빠른 반환용 메모리 캐시
  * - energy_nationwide_cache (DB): 재시작 후에도 유지 가능한 선택적 캐시 테이블
  *
- * 🔗 연동 관계
+ * 연동 관계
  * - routes/dashboard.js → /dashboard/energy API에서 getCache()로 조회
  * - app.js → setupEnergyCron()을 서버 시작 시 등록
  *
- * 📅 스케줄
+ * 스케줄
  * - 1분마다 자동 갱신 -> 66번 라인 cron.schedule
  */
 
@@ -34,8 +34,7 @@ async function refreshOnce() {
     getThermalNationwideSummary(),
   ]);
   memoryCache = { electric, thermal, updatedAt: new Date().toISOString() };
-
-  // (옵션) 재시작 후에도 유지하려면 DB에 저장
+  
   await pool.query(
     `CREATE TABLE IF NOT EXISTS energy_nationwide_cache (
        key text PRIMARY KEY,
@@ -62,12 +61,11 @@ async function refreshOnce() {
 function getCache() { return memoryCache; }
 
 function setupEnergyCron() {
-  // 매 1분 실행(원하면 */5로 5분마다 등)
+  // 매 1분 실행
   cron.schedule('*/1 * * * *', async () => {
     try { await refreshOnce(); console.log('[energyRefresh] refreshed'); }
     catch (e) { console.error('[energyRefresh] failed:', e); }
   });
-  // 서버 기동 직후 1회
   refreshOnce().catch(console.error);
 }
 

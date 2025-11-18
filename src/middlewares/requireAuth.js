@@ -1,17 +1,15 @@
 // middlewares/requireAuth.js
 const jwt = require('jsonwebtoken');
 
-/* 세션 쿠키 옵션 */
 function cookieOpts() {
   const prod = process.env.NODE_ENV === 'production';
   const domain = process.env.COOKIE_DOMAIN || undefined;
   return {
     httpOnly: true,
-    secure: prod,                 // 운영환경은 HTTPS 권장
+    secure: prod,
     sameSite: prod ? 'none' : 'lax',
-    domain,                       // 예: .example.com
-    path: '/',                    // 전체 경로에서만 유효
-    // maxAge 미지정 → 세션 쿠키
+    domain,
+    path: '/',
   };
 }
 
@@ -25,10 +23,10 @@ function signAccessToken(payload, sess) {
     throw new Error('signAccessToken: payload must include { sub, username }');
   }
   return jwt.sign(
-    { username: payload.username, sess }, // 커스텀 클레임
+    { username: payload.username, sess },
     process.env.JWT_ACCESS_SECRET,
     {
-      subject: String(payload.sub),       // 표준 sub 클레임
+      subject: String(payload.sub),
       expiresIn: process.env.ACCESS_TOKEN_EXPIRES || '15m',
       algorithm: 'HS256',
     }
@@ -36,7 +34,6 @@ function signAccessToken(payload, sess) {
 }
 
 function requireAuth(req, res, next) {
-  // 우선순위: Authorization: Bearer → 쿠키 access_token
   const bearer = req.headers.authorization || '';
   const token = bearer.startsWith('Bearer ')
     ? bearer.slice(7)
@@ -46,8 +43,8 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET, {
-      algorithms: ['HS256'],   // 알고리즘 고정
-      clockTolerance: 5,       // 시계 오차 허용(초)
+      algorithms: ['HS256'],   // 비밀번호 해시 알고리즘 HS256
+      clockTolerance: 5,
     });
 
     // --- 절대 세션 만료(예: 1시간) ---

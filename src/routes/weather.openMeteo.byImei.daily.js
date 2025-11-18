@@ -2,19 +2,12 @@
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
-
 const { pool } = require('../db/db.pg');
 const { mysqlPool } = require('../db/db.mysql');
-
-// (선택) ASOS 최인접 유틸
 const { nearestAsos } = require('../utils/nearestAsos');
-
-// (옵션) 카카오 지오코딩
 const KAKAO_REST_KEY = process.env.KAKAO_REST_KEY;
 
-/* ──────────────────────────────────────────────
- * IMEI → CID(Postgres) → 주소(MySQL)
- * ────────────────────────────────────────────── */
+// IMEI → CID(Postgres) → 주소(MySQL)
 async function resolveImeiMeta(imei) {
   const { rows } = await pool.query(
     `SELECT "cid" FROM public.log_remssendlog
@@ -35,9 +28,7 @@ async function resolveImeiMeta(imei) {
   return { found: true, cid, address: row.address || null };
 }
 
-/* ──────────────────────────────────────────────
- * 지오코딩(카카오)
- * ────────────────────────────────────────────── */
+// 지오코딩(카카오)
 async function geocodeAddress(addr) {
   if (!addr || !KAKAO_REST_KEY) return null;
   try {
@@ -57,9 +48,7 @@ async function geocodeAddress(addr) {
   }
 }
 
-/* ──────────────────────────────────────────────
- * Open-Meteo weathercode → 하늘/강수 텍스트
- * ────────────────────────────────────────────── */
+// Open-Meteo weathercode → 하늘/강수 텍스트
 function wcToSkyPty(wc) {
   if (wc === 0) return { sky: '맑음', pty: '없음' };
   if ([1, 2, 3].includes(wc)) return { sky: '구름많음', pty: '없음' };
@@ -68,10 +57,7 @@ function wcToSkyPty(wc) {
   return { sky: '흐림', pty: '없음' };
 }
 
-/* ──────────────────────────────────────────────
- * GET /api/weather/openmeteo/by-imei/daily
- *   ?imei=... [&days=7] [&lat=..&lon=..]
- * ────────────────────────────────────────────── */
+// GET /api/weather/openmeteo/by-imei/daily
 router.get('/by-imei/daily', async (req, res) => {
   try {
     const imei = String(req.query.imei || '').trim();
@@ -84,17 +70,14 @@ router.get('/by-imei/daily', async (req, res) => {
       return res.status(200).json({ ok: false, imei, reason: meta.reason });
     }
 
-    // 1) 쿼리 좌표 우선
     let lat = parseFloat(req.query.lat);
     let lon = parseFloat(req.query.lon);
 
-    // 2) 없으면 주소 지오코딩
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       const geo = await geocodeAddress(meta.address);
       if (geo) { lat = geo.lat; lon = geo.lon; }
     }
 
-    // 3) 그래도 없으면 실패
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       return res.status(200).json({
         ok: false, imei, cid: meta.cid, address: meta.address, reason: 'NO_GEO',
@@ -184,7 +167,6 @@ router.get('/by-imei/daily', async (req, res) => {
       asos
     });
   } catch (e) {
-    // 500일 때도 디버깅 정보 최대한 노출
     return res.status(500).json({
       ok: false,
       error: String(e?.message || e),

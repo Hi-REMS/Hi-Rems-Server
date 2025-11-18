@@ -1,15 +1,13 @@
 // src/energy/summary.js
 // 전국 에너지 집계 (전기/열) — MV 우선, 원본 최근구간 fallback
-// ✅ today/cumulative 모두 kWh로 통일
 
 const { pool } = require('../db/db.pg');
 
-// 환경 상수
-const ELECTRIC_CO2_PER_KWH = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.466'); // kgCO2/kWh
-const THERMAL_CO2_PER_KWH  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198'); // kgCO2/kWh
+const ELECTRIC_CO2_PER_KWH = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.466'); 
+const THERMAL_CO2_PER_KWH  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198'); 
 const KCAL_PER_KWH         = 860.42065;
 const LOG_TBL              = process.env.LOG_TBL || 'log_rtureceivelog';
-const HOURS_LOOKBACK       = Number(process.env.ENERGY_LOOKBACK_HOURS || '8'); // 기본 8시간
+const HOURS_LOOKBACK       = Number(process.env.ENERGY_LOOKBACK_HOURS || '8');
 
 const nz   = (v) => (v == null ? 0 : Number(v));
 const kg2t = (kg) => kg / 1000;
@@ -19,9 +17,6 @@ async function queryRow(sql, params = []) {
   return rows[0] || {};
 }
 
-/* -------------------- MV 기반 조회 -------------------- */
-// mv_energy_recent: electric은 min/max가 Wh, thermal은 kWh로 저장했었음
-// -> 여기서 모두 kWh로 변환해서 반환
 async function getElectricFromMV() {
   const sql = `
     SELECT
@@ -46,7 +41,6 @@ async function getThermalFromMV() {
   return queryRow(sql);
 }
 
-/* -------------------- fallback (최근 N시간만 원본) -------------------- */
 const U64_BE = (idxExpr) => `
 (
   (get_byte(b, ${idxExpr})     ::numeric * 72057594037927936::numeric) +
@@ -92,7 +86,6 @@ hdr AS (
 )
 `;
 
-// 전기: fallback도 kWh로 반환
 const PG_ELECTRIC_AGG = `
 ${BASE_PARSE},
 pv_single AS (
@@ -121,7 +114,6 @@ SELECT
 FROM per_dev;
 `;
 
-// 열: fallback은 이미 kWh 산출 (kcal → kWh 변환)
 const PG_THERMAL_AGG = `
 ${BASE_PARSE},
 th AS (
@@ -142,7 +134,6 @@ SELECT
 FROM per_dev;
 `;
 
-/* -------------------- 서비스 함수 -------------------- */
 async function getElectricNationwideSummary() {
   try {
     const mv = await getElectricFromMV();
@@ -161,7 +152,7 @@ async function getElectricNationwideSummary() {
     console.error('MV electric failed, fallback:', e);
   }
 
-  // fallback
+
   const row   = await queryRow(PG_ELECTRIC_AGG);
   const today = nz(row.kwh_today);
   const cum   = nz(row.kwh_cumulative);
@@ -193,7 +184,6 @@ async function getThermalNationwideSummary() {
     console.error('MV thermal failed, fallback:', e);
   }
 
-  // fallback
   const row   = await queryRow(PG_THERMAL_AGG);
   const today = nz(row.kwh_today);
   const cum   = nz(row.kwh_cumulative);

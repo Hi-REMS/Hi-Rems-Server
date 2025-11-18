@@ -14,10 +14,9 @@
 const BUILD = 'parser-geo+wind+fuelcell+ess-2025-10-31b';
 
 
-const KCAL_PER_KWH = 860.42065; // kcal → kWh 변환
-const HEATPUMP_STATE = { 0: '미작동', 1: '냉방', 2: '난방' }; // 지열 상태
+const KCAL_PER_KWH = 860.42065;
+const HEATPUMP_STATE = { 0: '미작동', 1: '냉방', 2: '난방' };
 
-// 태양광 인버터 상태 코드 (비트)
 const STATUS_MAP = {
   0: '인버터 미동작',
   1: '태양전지 과전압',
@@ -34,14 +33,12 @@ const STATUS_MAP = {
   12: '지락(누전)',
 };
 
-// 태양열/지열 고장비트 기본 매핑(문서상 확정: Bit0=미작동)
 const THERMAL_FAULT_MAP = {
-  0: '장비 미작동', // 강제/자연 공통
+  0: '장비 미작동', 
 };
 const GEOTHERMAL_FAULT_MAP = {
-  0: '히트펌프 미작동', // 히트펌프/부하 공통
+  0: '히트펌프 미작동', 
 };
-// 풍력 고장비트(문서상 Bit0=인버터 미동작, 나머지는 미정)
 const WIND_FAULT_MAP = {
   0: '인버터 미동작',
 };
@@ -53,12 +50,10 @@ const ESS_FAULT_MAP = {
   0: '장비 미작동',
 };
 
-// 에러코드 라벨
 const ERR_LABEL = {
   0x39: 'serial_comm_failure',
 };
 
-// 에너지원 코드 → 이름
 const ENERGY_NAME = {
   0x01: '태양광',
   0x02: '태양열',
@@ -68,13 +63,9 @@ const ENERGY_NAME = {
   0x07: 'ESS',
 };
 
-// ──────────────────────────────────────────────────────────────
-/** 유틸 */
-// ──────────────────────────────────────────────────────────────
 const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
 const toBytes = (s) => clean(s).split(' ').map((h) => parseInt(h, 16));
 
-// 바이트 읽기 (BE)
 const u16 = (a, i) => ((a[i] << 8) | a[i + 1]) >>> 0;
 const u32 = (a, i) =>
   (((a[i] << 24) | (a[i + 1] << 16) | (a[i + 2] << 8) | a[i + 3]) >>> 0) >>> 0;
@@ -88,14 +79,12 @@ const u64 = (a, i) =>
   (BigInt(a[i + 6]) << 8n) |
   BigInt(a[i + 7]);
 
-// 멀티 슬롯(0x00~0x03) → 1~4
+// 멀티 슬롯
 const getMulti = (m) =>
   (m === 0x00 ? 1 : m === 0x01 ? 2 : m === 0x02 ? 3 : m === 0x03 ? 4 : 1);
 
-// 상태 플래그 비트필드 → 문자열 리스트(태양광)
 const getStatuses = (flags) => faultBitsToList(flags, STATUS_MAP);
 
-// 공통: 비트필드 → 리스트 (정의된 비트는 라벨, 미정 비트는 ‘비정의 비트#n’)
 function faultBitsToList(flags, map = {}) {
   const L = [];
   for (let i = 0; i < 16; i++) {
@@ -106,26 +95,22 @@ function faultBitsToList(flags, map = {}) {
   return L;
 }
 
-// 누적 Wh 읽기(가변 길이)
 function readCumulativeWh(bytes, idx, need64MinLen, need32MinLen) {
   if (bytes.length >= need64MinLen) return u64(bytes, idx);
   if (bytes.length >= need32MinLen) return BigInt(u32(bytes, idx));
   return null;
 }
 
-// 온도 2바이트: 상위 nibble=부호(0 양수, F 음수), 하위 nibble + 다음 1바이트 = 값*10
 function temp10_from2bytes(a, i) {
   const b0 = a[i];
   const b1 = a[i + 1];
   const signNibble = (b0 & 0xF0) >>> 4;
-  const mag = ((b0 & 0x0F) << 8) | b1; // 10배 스케일
+  const mag = ((b0 & 0x0F) << 8) | b1; 
   const val = mag / 10;
   return signNibble === 0x0 ? val : -val;
 }
 
-// ──────────────────────────────────────────────────────────────
-/** 태양열 파서 (강제/자연) */
-// ──────────────────────────────────────────────────────────────
+// 태양열 파서 (강제/자연)
 function parseSolarThermalForced(bytes, off = 5) {
   const inlet    = temp10_from2bytes(bytes, off + 0); // 집열기 입구
   const outlet   = temp10_from2bytes(bytes, off + 2); // 집열기 출구
@@ -189,9 +174,7 @@ function parseSolarThermalNatural(bytes, off = 5) {
   };
 }
 
-// ──────────────────────────────────────────────────────────────
-/** 지열 파서 (스펙 확정 버전) */
-// ──────────────────────────────────────────────────────────────
+// 지열 파서
 function parseGeothermalHeatPumpExact(bytes, off = 5) {
   if (bytes.length < off + 41) return { short: true };
 
@@ -281,11 +264,7 @@ function parseGeothermalLoadExact(bytes, off = 5) {
   };
 }
 
-// ──────────────────────────────────────────────────────────────
-/** 풍력 파서 (0x04/0x01) — 24B Payload */
-// ①(전)전압 ②(전)전류 ③(전)출력 ④(후)전압 ⑤(후)전류 ⑥(후)출력 각 2B
-// ⑦ 주파수×10 2B, ⑧ 누적발전량 Wh 8B, ⑨ 고장여부 2B
-// ──────────────────────────────────────────────────────────────
+// 풍력 파서 
 function parseWindExact(bytes, off = 5) {
   if (bytes.length < off + 24) return { short: true };
 
@@ -298,7 +277,7 @@ function parseWindExact(bytes, off = 5) {
   const postOutputW   = u16(bytes, off + 10);
 
   const frequencyHz   = u16(bytes, off + 12) / 10.0;
-  const cumulativeWh  = u64(bytes, off + 14);  // BigInt(Wh)
+  const cumulativeWh  = u64(bytes, off + 14);
   const faultFlags    = u16(bytes, off + 22);
   const faultList     = faultBitsToList(faultFlags, WIND_FAULT_MAP);
 
@@ -315,10 +294,7 @@ function parseWindExact(bytes, off = 5) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────-
 // 메인 파서
-// ─────────────────────────────────────────────────────────────-
-// ─────────────────────────────────────────────────────────────-
 function parseFrame(hex) {
   const b = toBytes(hex);
   if (b.length < 5) return { ok: false, reason: 'short' };
@@ -356,7 +332,6 @@ function parseFrame(hex) {
     metrics: {},
   };
 
-  // 에러코드(헤더 제5바이트) 처리
   if (err !== 0x00) {
     return { ...out, ok: false, reason: ERR_LABEL[err] || 'device_error' };
   }
@@ -554,8 +529,6 @@ function parseFrame(hex) {
     out.metrics = m;
     return out;
   }
-
-  // 기타(미지원)
   return out;
 }
 
@@ -573,9 +546,9 @@ function parseFuelCellExact(bytes, off = 5) {
   const postOutputW   = u16(bytes, off + 10);
 
   const heatGenW      = u16(bytes, off + 12);
-  const producedKwh10 = u64(bytes, off + 14); // 누적 생산 열량 (kWh×10)
-  const usedHeatKwh10 = u64(bytes, off + 22); // 사용 열량 (kWh×10)
-  const usedElecKwh10 = u64(bytes, off + 30); // 전기 사용량 (kWh×10)
+  const producedKwh10 = u64(bytes, off + 14);
+  const usedHeatKwh10 = u64(bytes, off + 22);
+  const usedElecKwh10 = u64(bytes, off + 30);
   const feedTempC     = temp10_from2bytes(bytes, off + 38);
   const outletTempC   = temp10_from2bytes(bytes, off + 40);
   const efficiencyPct = u16(bytes, off + 42) / 10;
@@ -605,29 +578,22 @@ function parseFuelCellExact(bytes, off = 5) {
   };
 }
 
-// ──────────────────────────────────────────────────────────────
-/** ESS 파서 (0x07/0x01) — tail-robust
- *  끝 10바이트: [ .. arbitrary .. ][ cumulativeWh(8B) ][ fault(2B) ]
- *  그 앞 일부(선택): frequency(2B), inverterOutputW(2B), battery SOC/전압/전류 등
- */
+// ESS 파서 (0x07/0x01) — tail-robust
+
 function parseESSExact(bytes, off = 5) {
   if (bytes.length < off + 10) return { short: true };
 
-  // 항상 보장되는 꼬리부: cumulativeWh(8B) + fault(2B)
   const faultPos = bytes.length - 2;
   const cumPos   = bytes.length - 10;
   const faultFlags   = u16(bytes, faultPos);
   const cumulativeWh = u64(bytes, cumPos);
 
-  // 선택적 필드들(있으면 파싱, 없으면 null)
   let cursor = off;
   const safeU16 = (i) => (i + 1 < bytes.length ? u16(bytes, i) : null);
 
-  // 예시: 주파수, 출력W 등(장비마다 위치가 다를 수 있어 '있으면'만 노출)
   const frequencyHz      = (faultPos - 12 >= off) ? safeU16(faultPos - 12) / 10 : null;
   const inverterOutputW  = (faultPos - 10 >= off) ? safeU16(faultPos - 10) : null;
 
-  // 배터리/계통 전압·전류 추정(앞쪽부터 순차로 채움; 장비마다 다를 수 있어 null 허용)
   const battVoltageV = (bytes.length >= off + 6)  ? safeU16(off + 0) : null;
   const battCurrentA = (bytes.length >= off + 8)  ? safeU16(off + 2) : null;
   const gridVoltageV = (bytes.length >= off + 10) ? safeU16(off + 4) : null;
@@ -640,7 +606,6 @@ function parseESSExact(bytes, off = 5) {
     ((Number(inverterOutputW) || 0) > 0 || (Number(gridVoltageV) || 0) > 0);
 
   return {
-    // 전기 계측(있으면)
     inverterOutputW: inverterOutputW ?? null,
     frequencyHz:     frequencyHz ?? null,
     batteryVoltageV: battVoltageV ?? null,
@@ -648,11 +613,7 @@ function parseESSExact(bytes, off = 5) {
     gridVoltageV:    gridVoltageV ?? null,
     gridCurrentA:    gridCurrentA ?? null,
     socPct:          Number.isFinite(socPct) ? socPct : null,
-
-    // 누적량(필수)
     cumulativeWh,
-
-    // 상태/고장
     faultFlags,
     faultList,
     isOperating,

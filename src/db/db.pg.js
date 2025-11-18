@@ -1,3 +1,5 @@
+// src/db/db.pg.js
+
 const { Pool } = require('pg');
 
 const useSSL = String(process.env.DB_SSL || '').toLowerCase() === 'true';

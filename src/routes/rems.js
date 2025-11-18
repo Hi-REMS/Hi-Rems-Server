@@ -103,10 +103,8 @@ router.get('/geocode', limiterGeocode, async (req, res, next) => {
 });
 
 
-/**
- * GET /api/rems
- * - REMS 장비 목록 조회
- */
+// REMS 장비 목록 조회
+
 router.get('/', limiterList, async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
@@ -135,9 +133,7 @@ router.get('/', limiterList, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/**
- * GET /api/rems/agg/sido
- */
+// GET /api/rems/agg/sido
 router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
   try {
     const sql = `
@@ -189,9 +185,8 @@ router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
   } catch (e) { next(e); };
 });
 
-/**
- * GET /api/rems/agg/sigungu?sido=경기도
- */
+// ex ) GET /api/rems/agg/sigungu?sido=경기도
+
 router.get('/agg/sigungu', limiterAggSigu, async (req, res, next) => {
   try {
     const sido = (req.query.sido || '').trim();

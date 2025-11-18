@@ -9,21 +9,19 @@ const { parseFrame } = require('./parser');
 const { TZ, getRangeUtc, bucketKeyKST, whDeltaToKwh } = require('./timeutil');
 const { resolveOneImeiOrThrow } = require('./devices');
 
-// CO₂ 계수
 const ELECTRIC_CO2 = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.4747');
 const THERMAL_CO2  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198');
 const TREE_KG      = 6.6;
 const round2 = (v) => Math.round(v * 100) / 100;
 
-// 누적Wh 포함된 프레임만
 const MIN_BODYLEN_WITH_WH = 12;
 const LEN_WITH_WH_COND = `COALESCE("bodyLength", 9999) >= ${MIN_BODYLEN_WITH_WH}`;
 
-// 최근 N일만 스캔하도록 강제 (지열 03 → 최근 7일만)
+// 최근 N일만 스캔하도록
 const RECENT_WINDOW_BY_ENERGY = {
   '01': 30, // 태양광
   '02': 30, // 태양열
-  '03': 7,  // 지열 (대용량 → 7일만 스캔)
+  '03': 7,  // 지열
   '04': 14, // 풍력
   '06': 14, // 연료전지
   '07': 14, // ESS
@@ -54,7 +52,6 @@ const CO2_FOR = (energyHex) => {
 // 태양광만 멀티
 const MULTI_SUPPORTED = (energyHex) => (energyHex || '').toLowerCase() === '01';
 
-// HEX header 일부 파싱
 function headerFromHex(hex) {
   const parts = (hex || '').trim().split(/\s+/);
   return {
@@ -107,9 +104,6 @@ function buildTypeCondsForEnergy(energyHex, typeHex, params) {
   return { sql:null, added:false };
 }
 
-// ─────────────────────────────
-//        ENDPOINT
-// ─────────────────────────────
 router.get('/series', seriesLimiter, async (req, res, next) => {
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
@@ -123,8 +117,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const wantHourly = String(req.query.detail || '').toLowerCase()==='hourly';
     const multiParam = (req.query.multi || '').toLowerCase();
     const wantMulti = ['00','01','02','03'].includes(multiParam) ? multiParam : null;
-
-    // 기본 기간
     const startQ = parseYmd(req.query.start);
     const endQ = parseYmd(req.query.end);
     let startUtc, endUtc, bucket;
@@ -140,7 +132,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       bucket = r.bucket;
     }
 
-    // 🔥 yearly → 최근 N일로 강제 축소
     if (range === 'yearly') {
       const recentDays = RECENT_WINDOW_BY_ENERGY[energyHex] || 30;
       const recentUtc = new Date(Date.now() - recentDays * 86400 * 1000);
@@ -149,7 +140,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       bucket = 'day';
     }
 
-    // WHERE 조건 구성
     const conds = [
       `"rtuImei" = $1`,
       `"time" >= $2`,
@@ -180,10 +170,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     `;
 
     const { rows } = await pool.query(sql, params);
-
-    // ------------------------
-    // 누적Wh → kWh 일/월 집계
-    // ------------------------
     const perKey = new Map();
 
     for (const r of rows) {
@@ -233,9 +219,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
 
     series.sort((a,b)=>a.bucket.localeCompare(b.bucket));
 
-    // ------------------------
-    // yearly → month 집계
-    // ------------------------
     if (range === 'yearly') {
       const monthAgg = new Map();
       for (const row of series) {
@@ -259,9 +242,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const total_co2_kg = round2(total_kwh * co2Factor);
     const total_trees = Math.round(total_co2_kg / TREE_KG);
 
-    // ------------------------
-    // detail_hourly
-    // ------------------------
     let detail_hourly = null;
 
     if (wantHourly && rows.length && range !== 'yearly') {
@@ -310,7 +290,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       detail_hourly = { day:lastDay, rows: rowsHourly };
     }
 
-    // 응답
     res.json({
       deviceInfo:{rtuImei:imei, tz:TZ},
       params:{

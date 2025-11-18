@@ -8,14 +8,11 @@ const path = require('path');
 const fs = require('fs');
 const { setupEnergyCron } = require('./jobs/energyRefresh');
 const { getNormalPointsCached } = require('./jobs/normalPointCache');
-
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.set('trust proxy', 1);
 
-// ──────────────────────────────────────────────
-// ✅ CORS 설정 (부분매칭 허용)
 const whitelist = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
@@ -36,7 +33,6 @@ app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, uptime: process.uptime() });
 });
 
-// 글로벌 요청 제한
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 200,
@@ -46,11 +42,9 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
-// ──────────────────────────────────────────────
 // API
 app.use('/api', api);
 
-// DB health
 app.get('/api/health-direct', async (_req, res) => {
   try {
     const { pool } = require('./db/db.pg');
@@ -61,11 +55,10 @@ app.get('/api/health-direct', async (_req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────
 // 크론잡
 setupEnergyCron();
 
-// ✅ 정상 발전소 데이터 프리로드
+// 정상 발전소 데이터 프리로드
 const dist = path.join(__dirname, '../frontend/dist');
 app.get(/^\/(?!api\/).*/, async (req, res, next) => {
   try {
@@ -88,7 +81,6 @@ app.get(/^\/(?!api\/).*/, async (req, res, next) => {
   }
 });
 
-// ──────────────────────────────────────────────
 // 오류 핸들러
 app.use((err, _req, res, _next) => {
   console.error(err);
@@ -98,7 +90,6 @@ app.use((err, _req, res, _next) => {
   res.status(status).json(body);
 });
 
-// ──────────────────────────────────────────────
 // 서버 시작
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => {

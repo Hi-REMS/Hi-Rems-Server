@@ -83,9 +83,7 @@ const forgotLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/* ─────────────────────────────────────────────────────
- * 회원가입: worker(이름), phoneNumber 추가
- * ───────────────────────────────────────────────────── */
+// 회원가입
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -119,7 +117,6 @@ router.post('/register', async (req, res) => {
       parallelism: 1,
     });
 
-    // ★ phoneNumber는 반드시 큰따옴표로 감싸서 사용
     const { rows } = await client.query(
       `INSERT INTO public.members (username, password, worker, "phoneNumber")
        VALUES ($1, $2, $3, $4)
@@ -165,8 +162,6 @@ router.post('/login', loginLimiter, async (req, res) => {
       await logLoginAttempt({ username, success: false, ip, user_agent: ua, reason: 'missing_fields' });
       return res.status(400).json({ message: 'username/password required' });
     }
-
-    // ★ phoneNumber는 따옴표, username은 LOWER 비교
     const { rows } = await pool.query(
       'SELECT member_id, username, password, worker, "phoneNumber" FROM public.members WHERE LOWER(username)=$1',
       [String(username).trim().toLowerCase()]

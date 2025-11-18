@@ -5,16 +5,9 @@
 
 const express = require('express');
 const router = express.Router();
-
-// PostgreSQL 연결 풀
 const { pool } = require('../db/db.pg');
-
-// (선택) MySQL/MariaDB 연결 풀도 가져올 수 있음
 const { mysqlPool } = require('../db/db.mysql');
-
 const rateLimit = require('express-rate-limit');
-
-// 헬스체크는 모니터링 주기로만 호출되므로 1분에 30회 제한
 const healthLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -23,11 +16,7 @@ const healthLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/**
- * GET /api/health
- * - 서버와 DB 연결 여부를 확인
- * - PostgreSQL에서 NOW()를 조회하여 응답
- */
+// 서버와 DB 연결 여부를 확인
 router.get('/', healthLimiter, async (_req, res) => {
   try {
     const { rows } = await pool.query('SELECT NOW() AS now');

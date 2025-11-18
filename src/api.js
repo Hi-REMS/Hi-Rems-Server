@@ -17,8 +17,6 @@ const energySeriesRoutes  = require('./energy/series');
 const omByPointRoutes = require('./routes/weather.openMeteo.byPoint');
 const omByImeiRoutes  = require('./routes/weather.openMeteo.byImei');
 const omByImeiDailyRoutes = require('./routes/weather.openMeteo.byImei.daily');
-const weatherMonthlyRoutes = require('./routes/weather.monthly');
-
 const asosDailyRoutes = require('./routes/weather.asosDaily');
 
 // -------------------- 익스포트 --------------------
@@ -32,7 +30,7 @@ const maintenanceRoutes = require('./routes/maintenance');
 
 const membersRoutes     = require('./routes/members');
 const facilityUploadRoutes = require('./routes/facility.upload');
-// -------------------- 라우터 마운트 --------------------
+
 // 최상위
 router.use('/health', healthRoutes);
 router.use('/', dbTestRoutes);
@@ -44,11 +42,10 @@ router.use('/dashboard',   dashboardRoutes);
 router.use('/rems',        remsRoutes);
 
 // === 날씨 ===
-router.use('/weather/openmeteo', omByPointRoutes); // /api/weather/openmeteo/by-point
-router.use('/weather/openmeteo', omByImeiRoutes);  // /api/weather/openmeteo/by-imei
+router.use('/weather/openmeteo', omByPointRoutes);
+router.use('/weather/openmeteo', omByImeiRoutes);
 router.use('/weather/openmeteo', omByImeiDailyRoutes);
 router.use('/weather/asos', asosDailyRoutes);
-router.use('/weather', weatherMonthlyRoutes);
 
 // === 에너지 ===
 router.use('/energy', energySeriesRoutes);

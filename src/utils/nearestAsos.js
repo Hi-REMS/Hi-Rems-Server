@@ -24,9 +24,8 @@
 
 const stations = require('./asosStations');
 
-// 하버사인 거리(km)
 function haversine(lat1, lon1, lat2, lon2) {
-  const R = 6371; // km
+  const R = 6371;
   const toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
@@ -56,7 +55,6 @@ function nearestAsos(geo, opt = {}) {
     }
   }
 
-  // 선호 반경 밖이면 그대로 가장 가까운 곳 반환(혹은 null을 원하면 여기서 필터)
   return best && (best.distKm <= (opt.maxKmHard ?? Infinity) ? best : best);
 }
 

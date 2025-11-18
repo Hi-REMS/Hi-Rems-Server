@@ -3,9 +3,8 @@ const router = express.Router();
 const { pool } = require('../db/db.pg');
 const { requireAuth } = require('../middlewares/requireAuth');
 
-// ──────────────────────────────────────────────
-// (옵션) 관리자 여부 체크
-// ──────────────────────────────────────────────
+// 관리자 여부 체크
+
 async function requireAdmin(req, res, next) {
   try {
     const { sub } = req.user || {};
@@ -27,9 +26,7 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-// ──────────────────────────────────────────────
-// 1️⃣ 회원 목록 조회 (관리자만)
-// ──────────────────────────────────────────────
+// 회원 목록 조회 (관리자만)
 router.get('/', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -44,15 +41,12 @@ router.get('/', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────
-// 2️⃣ 회원 정보 수정 (worker, username, phoneNumber 등)
-// ──────────────────────────────────────────────
+// 회원 정보 수정
 router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const { worker, username, phoneNumber } = req.body || {};
 
-    // 🔹 1) 이메일 중복 체크 (자기 자신 제외)
     if (username) {
       const { rows: dup } = await pool.query(
         `SELECT member_id FROM public.members
@@ -67,7 +61,6 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       }
     }
 
-    // 🔹 2) 회원 정보 업데이트
     await pool.query(
       `UPDATE public.members
           SET worker = COALESCE($1, worker),
@@ -77,7 +70,6 @@ router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
       [worker, username, phoneNumber, id]
     );
 
-    // 🔹 3) 수정된 사용자 정보 조회 후 반환
     const { rows } = await pool.query(
       `SELECT member_id, username, worker, "phoneNumber", created_at
          FROM public.members

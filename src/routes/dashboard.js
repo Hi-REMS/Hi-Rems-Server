@@ -1,4 +1,3 @@
-// src/routes/dashboard.js
 // 대시보드 요약/건강 지표 API 라우트 (지역 위험도 집계 + 5분 캐시 포함)
 
 const express = require('express');
@@ -6,10 +5,9 @@ const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
 
-// (선택) MySQL REMS 주소/업체 정보까지 묶고 싶다면 주석 해제
  const { mysqlPool } = require('../db/db.mysql');
 
-const TTL_MS = 5 * 60 * 1000; // ✅ 5분 캐시
+const TTL_MS = 5 * 60 * 1000;
 const cache = new Map();
 const setCache = (key, data, ttl = TTL_MS) =>
   cache.set(key, { data, exp: Date.now() + ttl });
@@ -25,9 +23,8 @@ setInterval(() => {
     if (!v || v.exp <= Date.now()) cache.delete(k);
   }
 }, 15 * 60 * 1000).unref();
-// ──────────────────────────────────────────────────────────────
+
 // Rate limiters
-// ──────────────────────────────────────────────────────────────
 const limiterBasic = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
@@ -52,11 +49,8 @@ const limiterAbnormal = rateLimit({
   legacyHeaders: false,
 });
 
-// ──────────────────────────────────────────────────────────────
-// 최신 상태 CTE (두 가지 버전)
-// - WithFault: faultFlags/fault_flag/fault 같은 컬럼이 있을 때만 사용 가능
-// - NoFault  : opMode만 사용 (fault 관련 컬럼 전혀 없을 때 사용)
-// ──────────────────────────────────────────────────────────────
+//  최신 상태 CTE (두 가지 버전)
+
 function latestStatusCteWithFault() {
   return `
     WITH recent_latest AS (
@@ -87,24 +81,7 @@ function latestStatusCteNoFault() {
   `;
 }
 
-
-// ──────────────────────────────────────────────────────────────
 // 주소 파싱/조인 유틸
-//  - parseKoreanAddress: 아주 단순히 "시/도 + 시/군/구"만 추출
-//  - fetchAddressMap: IMEI → {address, sido, sigungu} 매핑을 Postgres 캐시 테이블
-//    (public.imei_meta)에서 우선 시도. 없으면 (옵션) MySQL에서 조회.
-//    imei_meta 테이블이 없다면 try/catch 안에서 자동 스킵.
-//    imei_meta 스키마 예시:
-//      CREATE TABLE public.imei_meta(
-//        imei text PRIMARY KEY,
-//        address text,
-//        sido text,
-//        sigungu text,
-//        lat double precision,
-//        lon double precision,
-//        updated_at timestamptz default now()
-//      );
-// ──────────────────────────────────────────────────────────────
 function parseKoreanAddress(addr = '') {
   const t = String(addr || '').replace(/\s*\(.*?\)\s*/g, '').trim();
   if (!t) return { sido: '미지정', sigungu: '' };
@@ -143,7 +120,6 @@ async function fetchAddressMap(imeis) {
   const result = new Map();
   if (!imeis?.length) return result;
 
-  // 1) Postgres 캐시 테이블 우선
   try {
     const placeholders = imeis.map((_, i) => `$${i + 1}`).join(',');
     const { rows } = await pool.query(
@@ -160,43 +136,11 @@ async function fetchAddressMap(imeis) {
       });
     }
   } catch (_) {
-    // imei_meta 없음 → 무시
   }
-
-  // 2) (옵션) MySQL 메타로 보완
-  // if (result.size < imeis.length && mysqlPool) {
-  //   const remain = imeis.filter((id) => !result.has(id));
-  //   if (remain.length) {
-  //     const [metaRows] = await mysqlPool.query(
-  //       `SELECT rtu_id AS imei, address
-  //          FROM rems_rems
-  //         WHERE rtu_id IN (${remain.map(() => '?').join(',')})`,
-  //       remain
-  //     );
-  //     for (const m of metaRows) {
-  //       const { sido, sigungu } = parseKoreanAddress(m.address || '');
-  //       result.set(m.imei, {
-  //         address: m.address || '',
-  //         sido,
-  //         sigungu,
-  //       });
-  //     }
-  //   }
-  // }
-
   return result;
 }
 
-// ──────────────────────────────────────────────────────────────
-// 1) 기본 대시보드 지표 (5분 캐시)
-//  - Bit0(고장) 우선 사용, 실패 시 opMode 기준으로 폴백
-//  - ?nocache=1 로 캐시 무시 가능
-// ──────────────────────────────────────────────────────────────
-// ──────────────────────────────────────────────────────────────
-// 1) 기본 대시보드 지표 (5분 캐시)
-//  - Bit0(고장) 우선 사용, 실패 시 opMode(정수) 기준으로 폴백
-//  - ?nocache=1 로 캐시 무시 가능
-// ──────────────────────────────────────────────────────────────
+// 기본 대시보드 지표 (5분 캐시)
 router.get('/basic', limiterBasic, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
@@ -245,7 +189,6 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
       statusRows = rows;
     }
 
-    // KST 당일 집계 (UTC 보정)
     const { rows: todayRows } = await pool.query(`
       WITH bounds AS (
         SELECT
@@ -282,15 +225,7 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
   }
 });
 
-
-// ──────────────────────────────────────────────────────────────
-// 2) 이상 발전소 목록 (상세)  — 리스트는 실시간성이 있어 캐시 X
-//  - reason/priority/since 분류
-//  - 정렬: severity DESC → minutes_since DESC
-//  - 파라미터: lookbackDays, offlineMin, limit, offset
-//  - fault* 컬럼이 없으면 자동으로 opMode-only 대안 쿼리 수행
-//  - (옵션) IMEI→주소 메타 조인 가능 (아래 주석 참고)
-// ──────────────────────────────────────────────────────────────
+// 이상 발전소 목록 (상세)
 router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -395,25 +330,13 @@ router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
       ({ rows } = await pool.query(noFaultSql, [lookbackDays, offlineMin, limit, offset]));
     }
 
-    // ✅ (선택) 주소 메타 조인
-    // const imeis = rows.map(r => r.imei);
-    // const metaMap = await fetchAddressMap(imeis);
-    // rows = rows.map(r => {
-    //   const m = metaMap.get(r.imei);
-    //   return m ? { ...r, address: m.address, sido: m.sido, sigungu: m.sigungu } : r;
-    // });
-
     res.json({ items: rows, limit, offset, lookbackDays, offlineMin });
   } catch (e) {
     next(e);
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-// 3) 이상 발전소 요약 브레이크다운 (5분 캐시)
-//  - reason별 카운트
-//  - ?nocache=1 로 캐시 무시 가능
-// ──────────────────────────────────────────────────────────────
+// 이상 발전소 요약 브레이크다운 (5분 캐시)
 router.get('/abnormal/summary', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -480,18 +403,7 @@ router.get('/abnormal/summary', limiterAbnormal, async (req, res, next) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-// 4) 이상 발전소 지역별 요약 (PostgreSQL + MySQL JOIN)
-//    - level=sido / sigungu / both 지원
-//    - fault_flags 비트 1=FAULT, opMode!=0=ABNORMAL, 미보고시간>=offlineMin=OFFLINE
-//    - address → parseKoreanAddress + normalizeSido 적용
-// ──────────────────────────────────────────────────────────────
-// ──────────────────────────────────────────────────────────────
-// 4) 이상 발전소 지역별 요약 (PostgreSQL + MySQL JOIN)
-//    - level=sido / sigungu / both 지원
-//    - fault_flags 비트 1=FAULT, opMode!=0=ABNORMAL, 미보고시간>=offlineMin=OFFLINE
-//    - address → parseKoreanAddress + normalizeSido 적용
-// ──────────────────────────────────────────────────────────────
+// 이상 발전소 지역별 요약 
 router.get('/abnormal/by-region', async (req, res) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -499,12 +411,10 @@ router.get('/abnormal/by-region', async (req, res) => {
     const level        = (req.query.level || 'sido').toLowerCase();
     const filterSido   = req.query.sido ? req.query.sido.trim() : null;
 
-    // ⚠️ MySQL 연결이 선택사항인 환경 대비
     if (!mysqlPool) {
       return res.status(503).json({ ok: false, error: 'MySQL unavailable for region join' });
     }
 
-    // 1) 최신 상태: fault 컬럼이 있으면 사용, 없으면 opMode-only 폴백
     const withFaultCte = `
       WITH recent_latest AS (
         SELECT DISTINCT ON ("rtuImei")
@@ -547,7 +457,6 @@ router.get('/abnormal/by-region', async (req, res) => {
     }
     if (!latestRows.length) return res.json({ ok: true, items: [], count: 0, level, filterSido, lookbackDays, offlineMin });
 
-    // 2) 주소 메타 (MySQL)
     const imeis = latestRows.map(r => r.imei);
     const chunkSize = 1000;
     const addrMap = new Map();
@@ -569,7 +478,6 @@ router.get('/abnormal/by-region', async (req, res) => {
       }
     }
 
-    // 3) 집계
     const regionAgg = new Map();
     const norm = (s) => (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
 
@@ -578,7 +486,6 @@ router.get('/abnormal/by-region', async (req, res) => {
       const sido = normalizeSido(meta?.sido || '미지정');
       const sigungu = meta?.sigungu || '';
 
-      // 시/도 필터 (정규화 비교)
       if (filterSido && norm(sido) !== norm(normalizeSido(filterSido))) continue;
 
       let reason = 'NORMAL';
@@ -601,13 +508,7 @@ router.get('/abnormal/by-region', async (req, res) => {
   }
 });
 
-
-
-
-
-// ──────────────────────────────────────────────────────────────
-// 5) 전국 에너지 요약 (크론 캐시 기반) — 기존
-// ──────────────────────────────────────────────────────────────
+// 전국 에너지 요약
 router.get('/energy', limiterEnergy, async (_req, res, next) => {
   try {
     const { getCache } = require('../jobs/energyRefresh');
@@ -630,12 +531,7 @@ router.get('/energy', limiterEnergy, async (_req, res, next) => {
   }
 });
 
-// 6) 이상 발전소 포인트 (지도 표시용)
-//   - 필터: reason(ALL|OFFLINE|OPMODE_ABNORMAL|FAULT_BIT), sido, sigungu, offlineMin
-//   - 좌표는 우선 Postgres public.imei_meta(lat,lon) → 없으면 프론트에서 /rems/geocode로 보완
-// 이상 포인트 (지도용)
-// - reason: ALL|OFFLINE|OPMODE_ABNORMAL|FAULT_BIT
-// - sido/sigungu 필터 지원
+// 이상 발전소 포인트 (지도 표시용)
 router.get('/abnormal/points', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
@@ -689,7 +585,6 @@ router.get('/abnormal/points', async (req, res, next) => {
 
     if (!rows.length) return res.json({ ok: true, items: [] });
 
-    // ▼ imei_meta 조회 (worker 포함)
     const imeis = rows.map(r => r.imei);
     let metaMap = new Map();
 
@@ -705,7 +600,6 @@ router.get('/abnormal/points', async (req, res, next) => {
       metaMap = new Map(metas.map(m => [m.imei, m]));
     } catch {}
 
-    // ▼ MySQL에서 주소/worker 보강
     if (mysqlPool) {
       const lacks = rows.filter(r => {
         const meta = metaMap.get(r.imei);
@@ -773,17 +667,12 @@ router.get('/abnormal/points', async (req, res, next) => {
         last_time: r.last_time,
         minutes_since: Number(r.minutes_since?.toFixed?.(1) ?? r.minutes_since),
 
-        // 주소/좌표
         sido,
         sigungu,
         address: meta.address || '',
         lat: meta.lat ?? null,
         lon: meta.lon ?? null,
-
-        // ▼ worker 추가
         worker: meta.worker || null,
-
-        // 에너지 관련
         energy: meta.energy_hex ?? null,
         type: meta.type_hex ?? null,
         multi: meta.multi_count ?? null
@@ -795,11 +684,6 @@ router.get('/abnormal/points', async (req, res, next) => {
     next(e);
   }
 });
-
-
-
-
-
 
 router.get('/normal/points', async (req, res) => {
   try {
@@ -850,10 +734,7 @@ router.get('/normal/points', async (req, res) => {
         address: r.address,
         lat: r.lat,
         lon: r.lon,
-
-        // ▼ worker 추가
         worker: r.worker || null,
-
         energy: r.energy_hex ?? null,
         type: r.type_hex ?? null,
         multi: r.multi_count ?? null
@@ -863,7 +744,6 @@ router.get('/normal/points', async (req, res) => {
 
     res.json({ ok: true, items, pending });
 
-    // 좌표 없는 애들 기존 로직 유지
     const noCoords = rows.filter(r => !r.lat || !r.lon);
     if (noCoords.length > 0) {
       console.log(`🛰️ Found ${noCoords.length} normal points without coords — background sync start...`);
@@ -885,10 +765,5 @@ router.get('/normal/points', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
-
-
-
-
 
 module.exports = router;

@@ -1226,7 +1226,7 @@ router.get('/ess/instant',             limiterInstant,  (req,res,n)=>handleInsta
 router.get('/ess/instant/multi',       limiterInstantM, (req,res,n)=>handleInstantMulti(req,res,n,'07'));
 router.get('/ess/hourly',              limiterHourly,   (req,res,n)=>handleHourly(req,res,n,'07'));
 
-
+// 예외 처리
 router.use((err, req, res, next) => {
   console.error('[EnergyService Error]', err);
 

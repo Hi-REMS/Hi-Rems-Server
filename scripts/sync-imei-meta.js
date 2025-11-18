@@ -10,9 +10,6 @@ const axios = require('axios').create({
 const { pool } = require('../src/db/db.pg');
 const { mysqlPool } = require('../src/db/db.mysql');
 
-// ============================================================
-// 1) IMEI에서 최신 frame 읽어서 energy/type/multi 추출
-// ============================================================
 async function detectEnergyTypeMulti(imei) {
   const sql = `
     SELECT body
@@ -36,9 +33,6 @@ async function detectEnergyTypeMulti(imei) {
   };
 }
 
-// ============================================================
-// 2) 지역 파싱 / 지오코딩
-// ============================================================
 function normalizeSido(sido) {
   const map = {
     '강원특별자치도': '강원도',
@@ -90,9 +84,6 @@ async function geocodeViaKakao(address) {
   return { lat: Number(doc.y) || null, lon: Number(doc.x) || null };
 }
 
-// ============================================================
-// 3) PostgreSQL imei_meta UPSERT
-// ============================================================
 async function upsertImeiMeta(pgPool, row) {
   const q = `
 INSERT INTO public.imei_meta(
@@ -129,14 +120,10 @@ const args = [
   await pgPool.query(q, args);
 }
 
-// ============================================================
-// 4) MAIN SYNC PROCESS
-// ============================================================
 (async () => {
   try {
     console.log('▶ IMEI 메타 동기화 시작');
 
-    // MySQL에서 주소 읽기
     const sql = `
       SELECT
   rtu.rtuImei AS imei,
@@ -174,7 +161,6 @@ WHERE COALESCE(rems.address, '') <> '';
           let lat = meta?.lat ?? null;
           let lon = meta?.lon ?? null;
 
-          // 지오코딩 필요 시
           if (lat == null || lon == null) {
             try {
               const p = useKakaoDirect
@@ -187,7 +173,6 @@ WHERE COALESCE(rems.address, '') <> '';
             } catch (err) {}
           }
 
-          // ⭐ 최신 RTU 프레임에서 energy/type/multi 자동 감지
           let energyInfo = null;
           try {
             energyInfo = await detectEnergyTypeMulti(imei);
@@ -211,7 +196,6 @@ WHERE COALESCE(rems.address, '') <> '';
           processed++;
         })());
 
-        // 동시성 limit
         if (queue.length >= concurrency) {
           await Promise.race(queue);
         }

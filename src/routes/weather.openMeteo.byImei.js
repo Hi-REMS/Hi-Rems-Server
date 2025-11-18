@@ -4,8 +4,6 @@ const axios = require('axios');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
 const { mysqlPool } = require('../db/db.mysql');
-
-// 🔹 (추가) Kakao REST Key
 const KAKAO_REST_KEY = process.env.KAKAO_REST_KEY;
 
 // IMEI → CID → 주소
@@ -33,7 +31,7 @@ async function resolveImeiMeta(imei) {
   return { found: true, cid, address: row.address || null };
 }
 
-// 🔹 (추가) 주소 → 좌표(카카오)
+// 주소 → 좌표 
 async function geocodeAddress(addr) {
   if (!addr || !KAKAO_REST_KEY) return null;
   try {
@@ -53,9 +51,7 @@ async function geocodeAddress(addr) {
   }
 }
 
-// ───────────────────────────────────────────────
 // GET /api/weather/openmeteo/by-imei
-// ───────────────────────────────────────────────
 router.get('/by-imei', async (req, res) => {
   try {
     const imei = String(req.query.imei || '').trim();
@@ -64,17 +60,14 @@ router.get('/by-imei', async (req, res) => {
     const meta = await resolveImeiMeta(imei);
     if (!meta.found) return res.json({ ok: false, imei, reason: meta.reason });
 
-    // 1) 쿼리로 받은 좌표 우선
     let lat = parseFloat(req.query.lat);
     let lon = parseFloat(req.query.lon);
 
-    // 2) 없으면 주소 지오코딩(카카오)
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       const geo = await geocodeAddress(meta.address);
       if (geo) { lat = geo.lat; lon = geo.lon; }
     }
 
-    // 3) 그래도 없으면 실패
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       return res.json({
         ok: false,
@@ -168,7 +161,7 @@ router.get('/by-imei', async (req, res) => {
       address: meta.address,
       base_date: today,
       base_time: `${String(nowHour).padStart(2, '0')}:${String(nowMinute).padStart(2, '0')}`,
-      lat, lon,                 // 🔹 (추가) 디버깅/검증용
+      lat, lon,
       hourly,
     });
   } catch (e) {

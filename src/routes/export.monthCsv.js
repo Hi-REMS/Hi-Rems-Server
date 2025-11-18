@@ -8,10 +8,6 @@ const { pool } = require('../db/db.pg');
 const { mysqlPool } = require('../db/db.mysql');
 
 const router = express.Router();
-
-/* ──────────────────────────────────────────────────────────────
- * 작은 유틸
- * ────────────────────────────────────────────────────────────── */
 const pad2 = (n) => String(n).padStart(2, '0');
 const isFiniteNum = (v) => Number.isFinite(Number(v));
 
@@ -25,9 +21,7 @@ function monthStartEnd(year, month) {
   return { start, end, startStr, endStr };
 }
 
-/* ──────────────────────────────────────────────────────────────
- * 구름량(%)/날씨코드 → 텍스트 매핑
- * ────────────────────────────────────────────────────────────── */
+// 구름량(%)
 function cloudStatus(v) {
   const n = Number(v);
   if (isNaN(n)) return '';
@@ -38,26 +32,7 @@ function cloudStatus(v) {
   return '매우 흐림';
 }
 
-function weatherStatus(code) {
-  const c = Number(code);
-  if ([0].includes(c)) return '맑음';
-  if ([1].includes(c)) return '대체로 맑음';
-  if ([2].includes(c)) return '부분적 흐림';
-  if ([3].includes(c)) return '흐림';
-  if ([45, 48].includes(c)) return '안개';
-  if ([51, 53, 55].includes(c)) return '이슬비';
-  if ([61, 63, 65].includes(c)) return '비';
-  if ([66, 67].includes(c)) return '얼어붙는 비';
-  if ([71, 73, 75, 77].includes(c)) return '눈';
-  if ([80, 81, 82].includes(c)) return '소나기';
-  if ([95].includes(c)) return '뇌우';
-  if ([96, 99].includes(c)) return '우박·뇌우';
-  return '';
-}
-
-/* ──────────────────────────────────────────────────────────────
- * 캐시
- * ────────────────────────────────────────────────────────────── */
+// 캐시
 const imeiCidCache = new LRUCache({ max: 2000, ttl: 5 * 60 * 1000 });
 const cidAddrCache = new LRUCache({ max: 2000, ttl: 10 * 60 * 1000 });
 const geocache = new LRUCache({ max: 1000, ttl: 60 * 60 * 1000 });
@@ -131,9 +106,7 @@ async function geocodeByKakao(address) {
   return null;
 }
 
-/* ──────────────────────────────────────────────────────────────
- * OpenMeteo — 태양광 daily(일사량/일조시간/구름량/날씨코드)
- * ────────────────────────────────────────────────────────────── */
+// OpenMeteo — 태양광 daily(일사량/일조시간/구름량)
 async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
   const { startStr, endStr } = monthStartEnd(year, month);
 
@@ -151,7 +124,7 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
     longitude: lon,
     timezone: 'Asia/Seoul',
     daily: [
-      'weathercode',
+      // weathercode 제거됨
       'cloudcover_mean',
       'sunshine_duration',
       'shortwave_radiation_sum'
@@ -173,7 +146,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
 
   const results = {
     time: [],
-    weathercode: [],
     cloudcover_mean: [],
     sunshine_duration: [],
     shortwave_radiation_sum: []
@@ -189,7 +161,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
     if (r1.status === 200 && r1.data?.daily) {
       const d = r1.data.daily;
       results.time.push(...d.time);
-      results.weathercode.push(...d.weathercode);
       results.cloudcover_mean.push(...d.cloudcover_mean);
       results.sunshine_duration.push(...d.sunshine_duration);
       results.shortwave_radiation_sum.push(...d.shortwave_radiation_sum);
@@ -210,7 +181,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
       d.time.forEach((t, i) => {
         if (!seen.has(t)) {
           results.time.push(t);
-          results.weathercode.push(d.weathercode[i]);
           results.cloudcover_mean.push(d.cloudcover_mean[i]);
           results.sunshine_duration.push(d.sunshine_duration[i]);
           results.shortwave_radiation_sum.push(d.shortwave_radiation_sum[i]);
@@ -222,9 +192,7 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
   return { ok: true, daily: results };
 }
 
-/* ──────────────────────────────────────────────────────────────
- * 발전량(일별)
- * ────────────────────────────────────────────────────────────── */
+// 발전량(일별)
 async function fetchDailyEnergyKwh(imei, year, month) {
   const { start, end, startStr, endStr } = monthStartEnd(year, month);
 
@@ -310,9 +278,7 @@ async function fetchDailyEnergyKwh(imei, year, month) {
   return [];
 }
 
-/* ──────────────────────────────────────────────────────────────
- * 라우트: /api/export/monthCsv
- * ────────────────────────────────────────────────────────────── */
+// csv 라우터
 router.get('/monthCsv', async (req, res) => {
   try {
     const imei = String(req.query.imei || '').trim();
@@ -348,7 +314,6 @@ router.get('/monthCsv', async (req, res) => {
 
     const daily = om.daily;
     const tArr = daily.time || [];
-    const wcArr = daily.weathercode || [];
     const ccArr = daily.cloudcover_mean || [];
     const sunArr = daily.sunshine_duration || [];
     const radArr = daily.shortwave_radiation_sum || [];
@@ -357,14 +322,13 @@ router.get('/monthCsv', async (req, res) => {
     const energyMap = new Map(energyRows.map(r => [String(r.date), r.energy_kwh]));
 
     let csv =
-      '날짜,발전량(kWh),일사량(kWh/m²),일조시간(h),구름량(%),구름상태,날씨코드,날씨상태\n';
+      '날짜,발전량(kWh),일사량(kWh/m²),일조시간(h),구름량(%),구름상태\n';
 
     for (let i = 0; i < tArr.length; i++) {
       const ymd = String(tArr[i]).replace(/-/g, '');
       const kwh = energyMap.get(ymd) ?? '';
 
       const cloud = ccArr[i] ?? '';
-      const wcode = wcArr[i] ?? '';
 
       const row = [
         ymd,
@@ -372,9 +336,7 @@ router.get('/monthCsv', async (req, res) => {
         radArr[i] ?? '',
         sunArr[i] ? (sunArr[i] / 3600).toFixed(2) : '',
         cloud,
-        cloudStatus(cloud),
-        wcode,
-        weatherStatus(wcode)
+        cloudStatus(cloud)
       ];
 
       csv += row.join(',') + '\n';

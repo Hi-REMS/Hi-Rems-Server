@@ -1,8 +1,8 @@
 // server/routes/user.js
 const express = require('express');
 const router = express.Router();
-const { pool } = require('../db/db.pg');           // Postgres (members)
-const { mysqlPool } = require('../db/db.mysql');   // MariaDB  (rems_rems, rtu_rtu)
+const { pool } = require('../db/db.pg');
+const { mysqlPool } = require('../db/db.mysql');
 const { requireAuth } = require('../middlewares/requireAuth');
 
 /**
@@ -15,7 +15,6 @@ router.get('/imeis', requireAuth, async (req, res) => {
   const client = await pool.connect();
   let mysqlConn;
   try {
-    // 1) 내 members 정보 조회 (★ "phoneNumber"는 따옴표)
     const meSql = `SELECT worker, "phoneNumber" FROM public.members WHERE member_id = $1`;
     const { rows } = await client.query(meSql, [req.user.sub]);
     const me = rows[0];
@@ -23,9 +22,8 @@ router.get('/imeis', requireAuth, async (req, res) => {
 
     const worker = String(me.worker || '').trim();
     const phoneRaw = String(me.phoneNumber || '').trim();
-    const phoneDigits = phoneRaw.replace(/\D/g, ''); // 하이픈 제거 매칭
+    const phoneDigits = phoneRaw.replace(/\D/g, '');
 
-    // 2) MariaDB에서 rems_rems + rtu_rtu 조인
     mysqlConn = await mysqlPool.getConnection();
     const q = `
       SELECT rr.rtu_id, rr.worker, rr.phoneNumber, rr.createdDate, r.rtuimei
@@ -40,11 +38,10 @@ router.get('/imeis', requireAuth, async (req, res) => {
 
     const items = rows2.map(r => ({
       rtu_id: r.rtu_id,
-      rtuImei: r.rtuimei,      // 예) 03-58-77-70-72-84-30-59
+      rtuImei: r.rtuimei,
       createdDate: r.createdDate
     }));
 
-    // 3) 디폴트(가장 최근 등록)
     const defaultImei = items[0]?.rtuImei || null;
 
     return res.json({
