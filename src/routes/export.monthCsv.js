@@ -193,7 +193,7 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
 }
 
 // 발전량(일별)
-async function fetchDailyEnergyKwh(imei, year, month) {
+async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
   const { start, end, startStr, endStr } = monthStartEnd(year, month);
 
   try {
@@ -243,28 +243,31 @@ async function fetchDailyEnergyKwh(imei, year, month) {
     energyHex = await guessEnergyHex(imei);
   } catch {}
 
-  const callSeries = async (hex) => {
-    const params = {
-      imei,
-      range: 'daily',
-      start: startStr,
-      end: endStr,
-      energy: hex,
-    };
-
-    const r = await axios.get(seriesBase, {
-      params,
-      timeout: 12000,
-      validateStatus: () => true
-    });
-
-    if (r.status !== 200 || !Array.isArray(r.data?.series)) return null;
-
-    return r.data.series.map(s => ({
-      date: String(s.bucket).replace(/-/g, ''),
-      energy_kwh: Number(s.kwh) || 0
-    }));
+const callSeries = async (hex) => {
+  const params = {
+    imei,
+    range: 'daily',
+    start: startStr,
+    end: endStr,
+    energy: hex,
   };
+
+  if (multiHex) params.multi = multiHex;
+
+  const r = await axios.get(seriesBase, {
+    params,
+    timeout: 12000,
+    validateStatus: () => true,
+  });
+
+  if (r.status !== 200 || !Array.isArray(r.data?.series)) return null;
+
+  return r.data.series.map((s) => ({
+    date: String(s.bucket).replace(/-/g, ''),
+    energy_kwh: Number(s.kwh) || 0,
+  }));
+};
+
 
   const tryOrder = energyHex ? [energyHex, '02', '03', '01'] : ['02', '03', '01'];
 
@@ -280,6 +283,7 @@ async function fetchDailyEnergyKwh(imei, year, month) {
 
 // csv 라우터
 router.get('/monthCsv', async (req, res) => {
+ const multiHex = (req.query.multi || '').toLowerCase();
   try {
     const imei = String(req.query.imei || '').trim();
     const year = Number(req.query.year);
@@ -318,7 +322,7 @@ router.get('/monthCsv', async (req, res) => {
     const sunArr = daily.sunshine_duration || [];
     const radArr = daily.shortwave_radiation_sum || [];
 
-    const energyRows = await fetchDailyEnergyKwh(imei, year, month);
+    const energyRows = await fetchDailyEnergyKwh(imei, year, month, multiHex);
     const energyMap = new Map(energyRows.map(r => [String(r.date), r.energy_kwh]));
 
     let csv =
