@@ -62,7 +62,7 @@ const limiterPreview   = makeLimiter(30);
 const limiterDebug     = makeLimiter(10);
 const limiterInstant   = makeLimiter(30);
 const limiterInstantM  = makeLimiter(30);
-const limiterHourly    = makeLimiter(10);
+const limiterHourly    = makeLimiter(300);
 
 const jsonSafe = (obj) =>
   JSON.parse(JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
