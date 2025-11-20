@@ -1,5 +1,4 @@
 // src/energy/series.js
-// 에너지 시리즈 데이터 집계 (전기/열/풍력/연료전지/ESS 포함, 멀티 설비 대응: 태양광만 멀티)
 
 const express = require('express');
 const router = express.Router();
@@ -17,21 +16,18 @@ const round2 = (v) => Math.round(v * 100) / 100;
 const MIN_BODYLEN_WITH_WH = 12;
 const LEN_WITH_WH_COND = `COALESCE("bodyLength", 9999) >= ${MIN_BODYLEN_WITH_WH}`;
 
-// 최근 N일만 스캔하도록
 const RECENT_WINDOW_BY_ENERGY = {
-  '01': 30, // 태양광
-  '02': 30, // 태양열
-  '03': 7,  // 지열
-  '04': 14, // 풍력
-  '06': 14, // 연료전지
-  '07': 14, // ESS
+  '01': 30,
+  '02': 30,
+  '03': 7,
+  '04': 14,
+  '06': 14,
+  '07': 14,
 };
 
 function okClause(req) {
   const ok = String(req.query.ok || '1').toLowerCase();
-  return (ok === 'any' || ok === '0')
-    ? ''
-    : "AND split_part(body,' ',5)='00'";
+  return (ok === 'any' || ok === '0') ? '' : "AND split_part(body,' ',5)='00'";
 }
 
 const seriesLimiter = rateLimit({
@@ -42,14 +38,12 @@ const seriesLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// CO2 계수
 const CO2_FOR = (energyHex) => {
   const e = (energyHex || '').toLowerCase();
   if (e === '02' || e === '03') return THERMAL_CO2;
   return ELECTRIC_CO2;
 };
 
-// 태양광만 멀티
 const MULTI_SUPPORTED = (energyHex) => (energyHex || '').toLowerCase() === '01';
 
 function headerFromHex(hex) {
@@ -63,10 +57,7 @@ function headerFromHex(hex) {
 
 function kstDayKey(d) {
   const [y, m, day] = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Seoul',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
+    timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit'
   }).formatToParts(d).filter(p => p.type !== 'literal').map(p=>p.value);
   return `${y}-${m}-${day}`;
 }
@@ -83,13 +74,8 @@ function parseYmd(s) {
   return { y: +m[1], M: +m[2], d: +m[3] };
 }
 
-function kstStartUtc({ y, M, d }) {
-  return new Date(Date.UTC(y, M - 1, d, -9));
-}
-
-function kstEndExclusiveUtc({ y, M, d }) {
-  return new Date(Date.UTC(y, M - 1, d + 1, -9));
-}
+function kstStartUtc({ y, M, d }) { return new Date(Date.UTC(y, M - 1, d, -9)); }
+function kstEndExclusiveUtc({ y, M, d }) { return new Date(Date.UTC(y, M - 1, d + 1, -9)); }
 
 function buildTypeCondsForEnergy(energyHex, typeHex, params) {
   const e = (energyHex || '').toLowerCase();
@@ -117,6 +103,7 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const wantHourly = String(req.query.detail || '').toLowerCase()==='hourly';
     const multiParam = (req.query.multi || '').toLowerCase();
     const wantMulti = ['00','01','02','03'].includes(multiParam) ? multiParam : null;
+
     const startQ = parseYmd(req.query.start);
     const endQ = parseYmd(req.query.end);
     let startUtc, endUtc, bucket;
@@ -125,6 +112,10 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       startUtc = kstStartUtc(startQ);
       endUtc   = kstEndExclusiveUtc(endQ);
       bucket   = 'day';
+    } else if (range === 'yearly') {
+      endUtc = new Date();
+      startUtc = new Date(Date.now() - 30 * 86400 * 1000); 
+      bucket = 'day'; 
     } else {
       const r = getRangeUtc(range);
       startUtc = r.startUtc;
@@ -132,12 +123,14 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       bucket = r.bucket;
     }
 
-    if (range === 'yearly') {
-      const recentDays = RECENT_WINDOW_BY_ENERGY[energyHex] || 30;
-      const recentUtc = new Date(Date.now() - recentDays * 86400 * 1000);
-
-      startUtc = recentUtc;
-      bucket = 'day';
+    const limitDays = RECENT_WINDOW_BY_ENERGY[energyHex];
+    if (limitDays) {
+      const maxWindowMs = limitDays * 86400 * 1000;
+      const requestedDiff = endUtc.getTime() - startUtc.getTime();
+      if (requestedDiff > maxWindowMs) {
+        startUtc = new Date(endUtc.getTime() - maxWindowMs);
+        if (bucket === 'month') bucket = 'day';
+      }
     }
 
     const conds = [
@@ -152,8 +145,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     if (okFilter) conds.push(okFilter.replace(/^AND\s+/,''));
 
     const params = [imei, startUtc, endUtc];
-
-    if (energyHex) conds.push(`body LIKE '14 ${energyHex} %'`);
 
     const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
     if (tc.sql) conds.push(tc.sql);
@@ -172,11 +163,32 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const { rows } = await pool.query(sql, params);
     const perKey = new Map();
 
-    for (const r of rows) {
-      const p = parseFrame(r.body);
-      const head = headerFromHex(r.body);
+    let SAMPLE_INTERVAL_MS = (energyHex === '01') ? 0 : 10 * 60 * 1000;
+    let lastProcessedTime = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const currentTime = new Date(r.time).getTime();
+
+      const isFirst = (i === 0);
+      const isLast  = (i === rows.length - 1);
+
+      if (!isFirst && !isLast && SAMPLE_INTERVAL_MS > 0) {
+        if (currentTime - lastProcessedTime < SAMPLE_INTERVAL_MS) {
+          continue; 
+        }
+      }
+
+      const p = parseFrame(r.body); 
       const wh = p?.metrics?.cumulativeWh ?? null;
       if (wh == null) continue;
+
+      const head = headerFromHex(r.body);
+      if (energyHex && head.energyHex !== energyHex) {
+         continue;
+      }
+
+      lastProcessedTime = currentTime;
 
       const m = MULTI_SUPPORTED(head.energyHex)
         ? (wantMulti || (head.multi || '00'))
@@ -201,7 +213,6 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     for (const [key, rec] of perKey.entries()) {
       const [bkey] = key.split('|');
       const kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
-
       const cur = bucketAgg.get(bkey) || { kwh:0, firstAt:rec.firstTs, lastAt:rec.lastTs };
       cur.kwh += kwh;
       cur.firstAt = cur.firstAt ?? rec.firstTs;
@@ -213,14 +224,13 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       const kwh = round2(agg.kwh);
       const co2_kg = round2(kwh * co2Factor);
       const trees = Math.round(co2_kg / TREE_KG);
-
       return { bucket, kwh, co2_kg, trees, firstAt: agg.firstAt, lastAt: agg.lastAt };
     });
 
     series.sort((a,b)=>a.bucket.localeCompare(b.bucket));
 
     if (range === 'yearly') {
-      const monthAgg = new Map();
+       const monthAgg = new Map();
       for (const row of series) {
         const mk = row.bucket.slice(0,7);
         const t = monthAgg.get(mk) || {
@@ -249,14 +259,29 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       const lastDay = kstDayKey(new Date(lastRowTime));
       const perHourMap = new Map();
 
-      for (const r of rows) {
+      let lastHourlyProcessedTime = 0;
+      let HOURLY_SAMPLE_MS = (energyHex === '01') ? 0 : 60 * 1000;
+
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
         const t = new Date(r.time);
         if (kstDayKey(t) !== lastDay) continue;
 
+        const currentTime = t.getTime();
+        const isLast = (i === rows.length - 1);
+        
+        if (!isLast && HOURLY_SAMPLE_MS > 0 && (currentTime - lastHourlyProcessedTime < HOURLY_SAMPLE_MS)) {
+             continue;
+        }
+
         const p = parseFrame(r.body);
-        const head = headerFromHex(r.body);
         const wh = p?.metrics?.cumulativeWh ?? null;
         if (wh == null) continue;
+        
+        const head = headerFromHex(r.body);
+        if (energyHex && head.energyHex !== energyHex) continue;
+
+        lastHourlyProcessedTime = currentTime;
 
         const m = MULTI_SUPPORTED(head.energyHex) ? (head.multi || '00') : '00';
         if (wantMulti && MULTI_SUPPORTED(head.energyHex) && m !== wantMulti) continue;
@@ -268,25 +293,17 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
         rec.lastWh = wh;
         perHourMap.set(key, rec);
       }
-
+      
       const hourAgg = new Map();
       for (const [key, rec] of perHourMap.entries()) {
         const hh = key.split('|')[0];
         const kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
         hourAgg.set(hh, (hourAgg.get(hh)||0) + kwh);
       }
-
       const rowsHourly = Array.from({length:24},(_,i)=>String(i).padStart(2,'0')).map(hh=>{
         const kwh = round2(hourAgg.get(hh)||0);
-        return {
-          hour: `${hh}:00`,
-          kwh,
-          eff_pct:null,
-          weather:null,
-          co2_kg: round2(kwh * co2Factor)
-        };
+        return { hour: `${hh}:00`, kwh, eff_pct:null, weather:null, co2_kg: round2(kwh * co2Factor) };
       });
-
       detail_hourly = { day:lastDay, rows: rowsHourly };
     }
 
