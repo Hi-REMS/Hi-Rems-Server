@@ -328,23 +328,30 @@ router.get('/monthCsv', async (req, res) => {
     let csv =
       '날짜,발전량(kWh),일사량(kWh/m²),일조시간(h),구름량(%),구름상태\n';
 
-    for (let i = 0; i < tArr.length; i++) {
-      const ymd = String(tArr[i]).replace(/-/g, '');
-      const kwh = energyMap.get(ymd) ?? '';
+      const today = new Date();
+      const todayYmd = Number(today.toISOString().slice(0, 10).replace(/-/g, ''));
+      
+      for (let i = 0; i < tArr.length; i++) {
+        const ymdNum = Number(String(tArr[i]).replace(/-/g, ''));
 
-      const cloud = ccArr[i] ?? '';
+        if (ymdNum > todayYmd) continue;
 
-      const row = [
-        ymd,
-        kwh,
-        radArr[i] ?? '',
-        sunArr[i] ? (sunArr[i] / 3600).toFixed(2) : '',
-        cloud,
-        cloudStatus(cloud)
-      ];
+        const ymd = String(ymdNum);
+        const kwh = energyMap.get(ymd) ?? '';
+        const cloud = ccArr[i] ?? '';
 
-      csv += row.join(',') + '\n';
-    }
+        const row = [
+          ymd,
+          kwh,
+          radArr[i] ?? '',
+          sunArr[i] ? (sunArr[i] / 3600).toFixed(2) : '',
+          cloud,
+          cloudStatus(cloud)
+        ];
+
+        csv += row.join(',') + '\n';
+      }
+
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
