@@ -26,7 +26,6 @@ router.get('/by-point', async (req, res) => {
     const params = {
       latitude: lat,
       longitude: lon,
-      // ✅ 다양한 데이터 추가 (풍속, 습도, 체감온도, 기압, 운량, 강수확률)
       hourly: [
         'temperature_2m',              // 기온
         'apparent_temperature',        // 체감온도

@@ -4,13 +4,33 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
+const { parseFrame } = require('../energy/parser');
+const { mysqlPool } = require('../db/db.mysql');
 
- const { mysqlPool } = require('../db/db.mysql');
-
+// ──────────────────────────────────────────────────────────────
+//  캐시 유틸 (주로 /basic 에서 사용)
+// ──────────────────────────────────────────────────────────────
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map();
+
+const snapshotCache = new Map();
+const SNAPSHOT_TTL = 60 * 1000;
+
+function getSnapshotCache(key) {
+  const v = snapshotCache.get(key);
+  if (v && v.exp > Date.now()) return v.data;
+  if (v) snapshotCache.delete(key);
+  return null;
+}
+
+function setSnapshotCache(key, data) {
+  snapshotCache.set(key, { data, exp: Date.now() + SNAPSHOT_TTL });
+}
+
+
 const setCache = (key, data, ttl = TTL_MS) =>
   cache.set(key, { data, exp: Date.now() + ttl });
+
 const getCache = (key) => {
   const v = cache.get(key);
   if (v && v.exp > Date.now()) return v.data;
@@ -24,7 +44,9 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-// Rate limiters
+// ──────────────────────────────────────────────────────────────
+//  Rate limiters
+// ──────────────────────────────────────────────────────────────
 const limiterBasic = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
@@ -49,49 +71,9 @@ const limiterAbnormal = rateLimit({
   legacyHeaders: false,
 });
 
-//  최신 상태 CTE (두 가지 버전)
-
-function latestStatusCteWithFault() {
-  return `
-    WITH recent_latest AS (
-      SELECT DISTINCT ON ("rtuImei")
-             "rtuImei",
-             "opMode",
-             COALESCE("faultFlags", "fault_flag", "fault", 0) AS fault_flags,
-             public."log_rtureceivelog"."time" AS last_time
-      FROM public."log_rtureceivelog"
-      WHERE public."log_rtureceivelog"."time" >= NOW() - ($1::text || ' days')::interval
-      ORDER BY "rtuImei", public."log_rtureceivelog"."time" DESC
-    )
-  `;
-}
-
-function latestStatusCteNoFault() {
-  return `
-    WITH recent_latest AS (
-      SELECT DISTINCT ON ("rtuImei")
-             "rtuImei",
-             "opMode",
-             0::int AS fault_flags,
-             public."log_rtureceivelog"."time" AS last_time
-      FROM public."log_rtureceivelog"
-      WHERE public."log_rtureceivelog"."time" >= NOW() - ($1::text || ' days')::interval
-      ORDER BY "rtuImei", public."log_rtureceivelog"."time" DESC
-    )
-  `;
-}
-
-// 주소 파싱/조인 유틸
-function parseKoreanAddress(addr = '') {
-  const t = String(addr || '').replace(/\s*\(.*?\)\s*/g, '').trim();
-  if (!t) return { sido: '미지정', sigungu: '' };
-  const parts = t.split(/\s+/);
-  const sidoRaw = parts[0] || '미지정';
-  const sigungu = parts[1] || '';
-  return { sido: normalizeSido(sidoRaw), sigungu };
-}
-
-
+// ──────────────────────────────────────────────────────────────
+//  주소 파싱/조인 유틸
+// ──────────────────────────────────────────────────────────────
 function normalizeSido(sido) {
   const map = {
     '강원': '강원도',
@@ -115,6 +97,14 @@ function normalizeSido(sido) {
   return map[sido] || sido || '미지정';
 }
 
+function parseKoreanAddress(addr = '') {
+  const t = String(addr || '').replace(/\s*\(.*?\)\s*/g, '').trim();
+  if (!t) return { sido: '미지정', sigungu: '' };
+  const parts = t.split(/\s+/);
+  const sidoRaw = parts[0] || '미지정';
+  const sigungu = parts[1] || '';
+  return { sido: normalizeSido(sidoRaw), sigungu };
+}
 
 async function fetchAddressMap(imeis) {
   const result = new Map();
@@ -136,58 +126,182 @@ async function fetchAddressMap(imeis) {
       });
     }
   } catch (_) {
+    // 무시
   }
   return result;
 }
 
-// 기본 대시보드 지표 (5분 캐시)
+// ──────────────────────────────────────────────────────────────
+//  공통 헬퍼: IMEI별 건강 상태 스냅샷 계산
+//  - lookbackDays 기간 안의 "마지막 프레임" + 최근 1시간 프레임 전체를 같이 사용
+//  - 최근 1시간 프레임 중 bit0=1 이 하나라도 있으면 FAULT
+//  - 최근 1시간 프레임이 0개이고 offlineMin 이상 미수신이면 OFFLINE
+//  - 나머지는 OPMODE 기반 판단
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * @returns {Promise<{ devices: Array, byImei: Map<string, any> }>}
+ */
+async function computeHealthSnapshot(lookbackDays, offlineMin) {
+  const { rows: latestRows } = await pool.query(
+    `
+    SELECT DISTINCT ON (r."rtuImei")
+      r."rtuImei" AS imei,
+      r."opMode"  AS op_mode,
+      r."time"    AS last_time
+    FROM public."log_rtureceivelog" r
+    WHERE r."time" >= NOW() - make_interval(days => $1::int)
+    ORDER BY r."rtuImei", r."time" DESC
+    `,
+    [lookbackDays]
+  );
+
+  if (!latestRows.length) {
+    return { devices: [], byImei: new Map() };
+  }
+
+  const imeis = latestRows.map(r => r.imei);
+
+  // imei_meta → 에너지원 가져오기
+  const { rows: metaRows } = await pool.query(
+    `SELECT imei, energy_hex FROM public.imei_meta WHERE imei = ANY($1::text[])`,
+    [imeis]
+  );
+  const metaMap = new Map(metaRows.map(m => [m.imei, m]));
+
+  // 최근 1시간 플래그 파싱
+  const { rows: last1hRows } = await pool.query(
+    `
+    SELECT "rtuImei" AS imei, body, "time"
+    FROM public."log_rtureceivelog"
+    WHERE "time" >= NOW() - INTERVAL '1 hour'
+      AND "rtuImei" = ANY($1::text[])
+    `,
+    [imeis]
+  );
+
+  const map1h = new Map();
+
+  for (const r of last1hRows) {
+    let entry = map1h.get(r.imei);
+    if (!entry) {
+      entry = { frames1h: 0, hasFault1h: false, flags: [] };
+      map1h.set(r.imei, entry);
+    }
+
+    entry.frames1h++;
+
+    try {
+      const p = parseFrame(r.body);
+      const m = p?.metrics || {};
+      let flags = 0;
+
+      if (typeof m.faultFlags === 'number') flags = m.faultFlags;
+      else if (typeof m.statusFlags === 'number') flags = m.statusFlags;
+      else if (typeof m.faultCode === 'number') flags = m.faultCode;
+
+      entry.flags.push(flags);
+
+      if ((flags & 0x1) === 1) entry.hasFault1h = true;
+    } catch (_) {}
+  }
+
+  // ⭐ 태양광 낮/밤 구분
+  const hourKST = new Date().getHours();
+  const isNightTime = (hourKST < 8 || hourKST >= 17);  // 08~17만 낮
+
+  const devices = latestRows.map(r => {
+    const h = map1h.get(r.imei) || { frames1h: 0, hasFault1h: false, flags: [] };
+    const minutesSince = (Date.now() - new Date(r.last_time).getTime()) / 60000;
+
+    const energy = metaMap.get(r.imei)?.energy_hex || null;
+
+    const isPV = energy === '01';
+    const isThermal = energy === '02';
+    const isGeo = energy === '03';
+
+    let reason = 'NORMAL';
+
+    // ---------------------------
+    // ⭐ ① 태양광 야간 → 항상 NORMAL
+    // ---------------------------
+    if (isPV && isNightTime) {
+      reason = 'NORMAL';
+    }
+
+    // ---------------------------
+    // ⭐ ② 태양열/지열 OFFLINE 완화
+    // ---------------------------
+    else if ((isThermal || isGeo) && minutesSince >= 240) {
+      reason = 'OFFLINE';
+    }
+
+    // ---------------------------
+    // ⭐ ③ 기본 Fault/Offline/OPMODE 로직
+    // ---------------------------
+    else {
+      if (h.frames1h > 0 && h.hasFault1h) {
+        reason = 'FAULT_BIT';
+      } else if (minutesSince >= offlineMin) {
+        reason = 'OFFLINE';
+      } else if (r.op_mode !== '0') {
+        reason = 'OPMODE_ABNORMAL';
+      }
+    }
+
+    return {
+      imei: r.imei,
+      op_mode: r.op_mode,
+      last_time: r.last_time,
+      minutes_since: Number(minutesSince.toFixed(1)),
+      frames_1h: h.frames1h,
+      has_fault_1h: h.hasFault1h ? 1 : 0,
+      flags_1h: h.flags || [],
+      energy,
+      reason,
+    };
+  });
+
+  const byImei = new Map(devices.map(d => [d.imei, d]));
+  return { devices, byImei };
+}
+
+
+
+
+
+// ──────────────────────────────────────────────────────────────
+//  기본 대시보드 지표 (5분 캐시)
+// ──────────────────────────────────────────────────────────────
 router.get('/basic', limiterBasic, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
-    const noCache = String(req.query.nocache || '') === '1';
-    const cacheKey = `basic:${lookbackDays}`;
+    const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
+    const noCache      = String(req.query.nocache || '') === '1';
 
+    const cacheKey = `basic:${lookbackDays}:${offlineMin}`;
     if (!noCache) {
       const c = getCache(cacheKey);
       if (c) return res.json(c);
     }
 
-    const tryFaultBitSql = `
-      ${latestStatusCteWithFault()}
-      SELECT
-        COUNT(*)::int AS total_plants,
-        COUNT(*) FILTER (
-          WHERE (fault_flags & 1) = 0
-            AND COALESCE(("opMode")::int, 0) = 0
-        )::int AS normal_plants,
-        COUNT(*) FILTER (
-          WHERE (fault_flags & 1) = 1
-             OR COALESCE(("opMode")::int, 0) <> 0
-        )::int AS abnormal_plants
-      FROM recent_latest;
-    `;
+    const snapKey = `${lookbackDays}:${offlineMin}`;
+let snapshot = getSnapshotCache(snapKey);
 
-    const fallbackSql = `
-      ${latestStatusCteNoFault()}
-      SELECT
-        COUNT(*)::int AS total_plants,
-        COUNT(*) FILTER (
-          WHERE COALESCE(("opMode")::int, 0) = 0
-        )::int AS normal_plants,
-        COUNT(*) FILTER (
-          WHERE COALESCE(("opMode")::int, 0) <> 0
-        )::int AS abnormal_plants
-      FROM recent_latest;
-    `;
+if (!snapshot) {
+  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+  setSnapshotCache(snapKey, snapshot);
+}
 
-    let statusRows = [];
-    try {
-      const { rows } = await pool.query(tryFaultBitSql, [lookbackDays]);
-      statusRows = rows;
-    } catch {
-      const { rows } = await pool.query(fallbackSql, [lookbackDays]);
-      statusRows = rows;
-    }
+const { devices } = snapshot;
+
+    const total_plants = devices.length;
+
+const faultCnt   = devices.filter(d => d.reason === 'FAULT_BIT').length;
+const offlineCnt = devices.filter(d => d.reason === 'OFFLINE').length;
+
+const abnormal_plants = faultCnt + offlineCnt;
+const normal_plants   = total_plants - abnormal_plants;
 
     const { rows: todayRows } = await pool.query(`
       WITH bounds AS (
@@ -204,17 +318,18 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
            WHERE "time" >= b.kst_start_utc AND "time" < b.kst_end_utc) AS devices;
     `);
 
-    const totalsRow = statusRows?.[0] || {};
     const payload = {
       totals: {
-        total_plants:    totalsRow.total_plants    ?? 0,
-        normal_plants:   totalsRow.normal_plants   ?? 0,
-        abnormal_plants: totalsRow.abnormal_plants ?? 0,
+        total_plants,
+        normal_plants,
+        abnormal_plants,
       },
       today: {
         total_messages: todayRows?.[0]?.total_messages ?? 0,
         devices:        todayRows?.[0]?.devices        ?? 0,
       },
+      lookbackDays,
+      offlineMin,
       cached: false,
     };
 
@@ -225,7 +340,9 @@ router.get('/basic', limiterBasic, async (req, res, next) => {
   }
 });
 
-// 이상 발전소 목록 (상세)
+// ──────────────────────────────────────────────────────────────
+//  이상 발전소 목록 (상세 리스트) — 메타데이터 포함 버전
+// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -233,177 +350,158 @@ router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
     const limit        = Math.min(parseInt(req.query.limit        || '50', 10), 200);
     const offset       = Math.max(parseInt(req.query.offset       || '0',  10), 0);
 
-    const withFaultSql = `
-      ${latestStatusCteWithFault()}
-      , annotated AS (
-        SELECT
-          r."rtuImei"              AS imei,
-          r."opMode"               AS op_mode,
-          r.fault_flags            AS fault_flags,
-          r.last_time,
-          EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 AS minutes_since,
-          CASE
-            WHEN (r.fault_flags & 1) = 1 THEN 'FAULT_BIT'
-            WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 'OFFLINE'
-            WHEN r."opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-            ELSE 'NORMAL'
-          END AS reason,
-          CASE
-            WHEN (r.fault_flags & 1) = 1 THEN 3
-            WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 2
-            WHEN r."opMode" <> '0' THEN 1
-            ELSE 0
-          END AS severity
-        FROM recent_latest r
-      )
-      , with_counts AS (
-        SELECT
-          a.*,
-          (SELECT COUNT(*) FROM public."log_rtureceivelog" lr
-            WHERE lr."rtuImei" = a.imei
-              AND lr."time" >= NOW() - interval '24 hours')::int AS msgs_24h
-        FROM annotated a
-      )
-      SELECT
-        imei,
-        op_mode,
-        fault_flags,
-        last_time,
-        ROUND(minutes_since::numeric, 1) AS minutes_since,
-        reason,
-        severity,
-        msgs_24h
-      FROM with_counts
-      WHERE reason <> 'NORMAL'
-      ORDER BY severity DESC, minutes_since DESC
-      LIMIT $3 OFFSET $4
-    `;
+    const snapKey = `${lookbackDays}:${offlineMin}`;
+    let snapshot = getSnapshotCache(snapKey);
 
-    const noFaultSql = `
-      ${latestStatusCteNoFault()}
-      , annotated AS (
-        SELECT
-          r."rtuImei"              AS imei,
-          r."opMode"               AS op_mode,
-          r.fault_flags            AS fault_flags, -- 항상 0
-          r.last_time,
-          EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 AS minutes_since,
-          CASE
-            WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 'OFFLINE'
-            WHEN r."opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-            ELSE 'NORMAL'
-          END AS reason,
-          CASE
-            WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 2
-            WHEN r."opMode" <> '0' THEN 1
-            ELSE 0
-          END AS severity
-        FROM recent_latest r
-      )
-      , with_counts AS (
-        SELECT
-          a.*,
-          (SELECT COUNT(*) FROM public."log_rtureceivelog" lr
-            WHERE lr."rtuImei" = a.imei
-              AND lr."time" >= NOW() - interval '24 hours')::int AS msgs_24h
-        FROM annotated a
-      )
-      SELECT
-        imei,
-        op_mode,
-        fault_flags,
-        last_time,
-        ROUND(minutes_since::numeric, 1) AS minutes_since,
-        reason,
-        severity,
-        msgs_24h
-      FROM with_counts
-      WHERE reason <> 'NORMAL'
-      ORDER BY severity DESC, minutes_since DESC
-      LIMIT $3 OFFSET $4
-    `;
-
-    let rows;
-    try {
-      ({ rows } = await pool.query(withFaultSql, [lookbackDays, offlineMin, limit, offset]));
-    } catch (e1) {
-      ({ rows } = await pool.query(noFaultSql, [lookbackDays, offlineMin, limit, offset]));
+    if (!snapshot) {
+      snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+      setSnapshotCache(snapKey, snapshot);
     }
 
-    res.json({ items: rows, limit, offset, lookbackDays, offlineMin });
+    const { devices } = snapshot;
+
+    const abnormal = devices
+      .filter(d => d.reason !== 'NORMAL')
+      .map(d => ({
+        ...d,
+        fault_flags: d.flags_1h || [],
+        severity:
+          d.reason === 'FAULT_BIT' ? 3 :
+          d.reason === 'OFFLINE' ? 2 :
+          d.reason === 'OPMODE_ABNORMAL' ? 1 : 0,
+      }))
+      .sort((a, b) => {
+        if (b.severity !== a.severity) return b.severity - a.severity;
+        return b.minutes_since - a.minutes_since;
+      });
+    const sliced = abnormal.slice(offset, offset + limit);
+
+    const imeis = sliced.map(s => s.imei);
+
+    let metaMap = new Map();
+    try {
+      const { rows: metas } = await pool.query(
+        `SELECT imei, address, sido, sigungu, lat, lon,
+                energy_hex, type_hex, multi_count, worker
+         FROM public.imei_meta
+         WHERE imei = ANY($1::text[])`,
+        [imeis]
+      );
+      metaMap = new Map(metas.map(m => [m.imei, m]));
+    } catch (_) {}
+
+    if (mysqlPool) {
+      const lacks = imeis.filter(i => {
+        const m = metaMap.get(i);
+        return !m || !m.address;
+      });
+
+      if (lacks.length) {
+        const sql = `
+          SELECT
+            COALESCE(rtu.rtuImei, rems.rtu_id) AS imei,
+            COALESCE(rems.address, '') AS address,
+            rems.worker AS worker
+          FROM rems_rems AS rems
+          LEFT JOIN rtu_rtu AS rtu
+            ON rtu.id = rems.rtu_id
+          WHERE rtu.rtuImei IN (${lacks.map(()=>'?').join(',')})
+             OR rems.rtu_id  IN (${lacks.map(()=>'?').join(',')})
+        `;
+        const [rows] = await mysqlPool.query(sql, [...lacks, ...lacks]);
+
+        for (const r of rows) {
+          const { sido, sigungu } = parseKoreanAddress(r.address || '');
+          const old = metaMap.get(r.imei) || {};
+
+          metaMap.set(r.imei, {
+            ...old,
+            imei: r.imei,
+            address: r.address || '',
+            worker: r.worker || old.worker || null,
+            sido,
+            sigungu,
+            lat: old.lat ?? null,
+            lon: old.lon ?? null,
+            energy_hex: old.energy_hex ?? null,
+            type_hex: old.type_hex ?? null,
+            multi_count: old.multi_count ?? null,
+          });
+        }
+      }
+    }
+
+    const enriched = sliced.map(s => {
+      const m = metaMap.get(s.imei) || {};
+      return {
+        ...s,
+        address: m.address || '',
+        sido: m.sido || '',
+        sigungu: m.sigungu || '',
+        lat: m.lat ?? null,
+        lon: m.lon ?? null,
+        worker: m.worker || null,
+        energy: m.energy_hex ?? null,
+        type: m.type_hex ?? null,
+        multi: m.multi_count ?? null
+      };
+    });
+
+    res.json({
+      items: enriched,
+      limit,
+      offset,
+      lookbackDays,
+      offlineMin,
+    });
+
   } catch (e) {
     next(e);
   }
 });
 
-// 이상 발전소 요약 브레이크다운 (5분 캐시)
+// ──────────────────────────────────────────────────────────────
+//  이상 발전소 요약 브레이크다운
+// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/summary', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
-    const noCache = String(req.query.nocache || '') === '1';
-    const cacheKey = `abn-summary:${lookbackDays}:${offlineMin}`;
+    const noCache      = String(req.query.nocache || '') === '1';
 
+    const cacheKey = `abn-summary:${lookbackDays}:${offlineMin}`;
     if (!noCache) {
       const c = getCache(cacheKey);
       if (c) return res.json(c);
     }
 
-    const withFaultSql = `
-      ${latestStatusCteWithFault()}
-      SELECT reason, COUNT(*)::int AS count FROM (
-        SELECT
-          CASE
-            WHEN (fault_flags & 1) = 1 THEN 'FAULT_BIT'
-            WHEN EXTRACT(EPOCH FROM (NOW() - last_time))/60.0 >= $2 THEN 'OFFLINE'
-            WHEN "opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-            ELSE 'NORMAL'
-          END AS reason
-        FROM recent_latest
-      ) x
-      WHERE reason <> 'NORMAL'
-      GROUP BY reason
-      ORDER BY count DESC;
-    `;
+    const snapKey = `${lookbackDays}:${offlineMin}`;
+let snapshot = getSnapshotCache(snapKey);
 
-    const noFaultSql = `
-      ${latestStatusCteNoFault()}
-      SELECT reason, COUNT(*)::int AS count FROM (
-        SELECT
-          CASE
-            WHEN EXTRACT(EPOCH FROM (NOW() - last_time))/60.0 >= $2 THEN 'OFFLINE'
-            WHEN "opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-            ELSE 'NORMAL'
-          END AS reason
-        FROM recent_latest
-      ) x
-      WHERE reason <> 'NORMAL'
-      GROUP BY reason
-      ORDER BY count DESC;
-    `;
+if (!snapshot) {
+  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+  setSnapshotCache(snapKey, snapshot);
+}
 
-    let rows;
-    try {
-      ({ rows } = await pool.query(withFaultSql, [lookbackDays, offlineMin]));
-    } catch (e1) {
-      ({ rows } = await pool.query(noFaultSql, [lookbackDays, offlineMin]));
-    }
+const { devices } = snapshot;
 
     const summary = {
-      FAULT_BIT:        rows.find(r => r.reason === 'FAULT_BIT')?.count ?? 0,
-      OFFLINE:          rows.find(r => r.reason === 'OFFLINE')?.count ?? 0,
-      OPMODE_ABNORMAL:  rows.find(r => r.reason === 'OPMODE_ABNORMAL')?.count ?? 0,
+      FAULT_BIT:        devices.filter(d => d.reason === 'FAULT_BIT').length,
+      OFFLINE:          devices.filter(d => d.reason === 'OFFLINE').length,
+      OPMODE_ABNORMAL:  devices.filter(d => d.reason === 'OPMODE_ABNORMAL').length,
     };
 
-    const payload = { summary, lookbackDays, offlineMin, cached: true };
-    setCache(cacheKey, payload);
+    const payload = { summary, lookbackDays, offlineMin, cached: false };
+    setCache(cacheKey, { ...payload, cached: true });
     res.json(payload);
   } catch (e) {
     next(e);
   }
 });
 
-// 이상 발전소 지역별 요약 
+// ──────────────────────────────────────────────────────────────
+//  이상 발전소 지역별 요약
+// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/by-region', async (req, res) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -415,49 +513,23 @@ router.get('/abnormal/by-region', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'MySQL unavailable for region join' });
     }
 
-    const withFaultCte = `
-      WITH recent_latest AS (
-        SELECT DISTINCT ON ("rtuImei")
-               "rtuImei" AS imei,
-               "opMode"  AS op_mode,
-               COALESCE("faultFlags", "fault_flag", "fault", 0) AS fault_flags,
-               "time"    AS last_time
-        FROM public."log_rtureceivelog"
-        WHERE "time" >= NOW() - make_interval(days => $1::int)
-        ORDER BY "rtuImei", "time" DESC
-      )
-      SELECT imei, op_mode, fault_flags,
-             EXTRACT(EPOCH FROM (NOW() - last_time))/60.0 AS minutes_since
-      FROM recent_latest
-    `;
+    const snapKey = `${lookbackDays}:${offlineMin}`;
+let snapshot = getSnapshotCache(snapKey);
 
-    const noFaultCte = `
-      WITH recent_latest AS (
-        SELECT DISTINCT ON ("rtuImei")
-               "rtuImei" AS imei,
-               "opMode"  AS op_mode,
-               0::int    AS fault_flags,
-               "time"    AS last_time
-        FROM public."log_rtureceivelog"
-        WHERE "time" >= NOW() - make_interval(days => $1::int)
-        ORDER BY "rtuImei", "time" DESC
-      )
-      SELECT imei, op_mode, fault_flags,
-             EXTRACT(EPOCH FROM (NOW() - last_time))/60.0 AS minutes_since
-      FROM recent_latest
-    `;
+if (!snapshot) {
+  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+  setSnapshotCache(snapKey, snapshot);
+}
 
-    let latestRows;
-    try {
-      const { rows } = await pool.query(withFaultCte, [lookbackDays]);
-      latestRows = rows;
-    } catch (_) {
-      const { rows } = await pool.query(noFaultCte, [lookbackDays]);
-      latestRows = rows;
+const { devices } = snapshot;
+
+    const abnormal = devices.filter(d => d.reason !== 'NORMAL');
+
+    if (!abnormal.length) {
+      return res.json({ ok: true, items: [], count: 0, level, filterSido, lookbackDays, offlineMin });
     }
-    if (!latestRows.length) return res.json({ ok: true, items: [], count: 0, level, filterSido, lookbackDays, offlineMin });
 
-    const imeis = latestRows.map(r => r.imei);
+    const imeis = abnormal.map(d => d.imei);
     const chunkSize = 1000;
     const addrMap = new Map();
 
@@ -481,22 +553,28 @@ router.get('/abnormal/by-region', async (req, res) => {
     const regionAgg = new Map();
     const norm = (s) => (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
 
-    for (const r of latestRows) {
-      const meta = addrMap.get(r.imei);
-      const sido = normalizeSido(meta?.sido || '미지정');
-      const sigungu = meta?.sigungu || '';
+    for (const d of abnormal) {
+      const meta = addrMap.get(d.imei) || {};
+      const sido = normalizeSido(meta.sido || '미지정');
+      const sigungu = meta.sigungu || '';
 
       if (filterSido && norm(sido) !== norm(normalizeSido(filterSido))) continue;
 
-      let reason = 'NORMAL';
-      if ((r.fault_flags & 1) === 1) reason = 'FAULT_BIT';
-      else if (r.minutes_since >= offlineMin) reason = 'OFFLINE';
-      else if (r.op_mode !== '0') reason = 'OPMODE_ABNORMAL';
-      if (reason === 'NORMAL') continue;
-
       const key = level === 'sido' ? `${sido}|` : `${sido}|${sigungu}`;
-      const cur = regionAgg.get(key) || { sido, sigungu, OFFLINE: 0, OPMODE_ABNORMAL: 0, FAULT_BIT: 0, total: 0 };
-      cur[reason]++; cur.total++;
+      const cur = regionAgg.get(key) || {
+        sido,
+        sigungu,
+        OFFLINE: 0,
+        OPMODE_ABNORMAL: 0,
+        FAULT_BIT: 0,
+        total: 0,
+      };
+
+      if (d.reason === 'FAULT_BIT') cur.FAULT_BIT++;
+      else if (d.reason === 'OFFLINE') cur.OFFLINE++;
+      else if (d.reason === 'OPMODE_ABNORMAL') cur.OPMODE_ABNORMAL++;
+
+      cur.total++;
       regionAgg.set(key, cur);
     }
 
@@ -508,7 +586,9 @@ router.get('/abnormal/by-region', async (req, res) => {
   }
 });
 
-// 전국 에너지 요약
+// ──────────────────────────────────────────────────────────────
+//  전국 에너지 요약 (/energy)
+// ──────────────────────────────────────────────────────────────
 router.get('/energy', limiterEnergy, async (_req, res, next) => {
   try {
     const { getCache } = require('../jobs/energyRefresh');
@@ -531,7 +611,9 @@ router.get('/energy', limiterEnergy, async (_req, res, next) => {
   }
 });
 
-// 이상 발전소 포인트 (지도 표시용)
+// ──────────────────────────────────────────────────────────────
+//  이상 발전소 포인트 (지도 표시용)
+// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/points', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
@@ -540,54 +622,26 @@ router.get('/abnormal/points', async (req, res, next) => {
     const filterSido   = (req.query.sido    || '').trim();
     const filterSigungu= (req.query.sigungu || '').trim();
 
-    const withFaultSql = `
-      ${latestStatusCteWithFault()}
-      SELECT
-        r."rtuImei" AS imei,
-        r."opMode"  AS op_mode,
-        r.fault_flags,
-        r.last_time,
-        EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 AS minutes_since,
-        CASE
-          WHEN (r.fault_flags & 1) = 1 THEN 'FAULT_BIT'
-          WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 'OFFLINE'
-          WHEN r."opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-          ELSE 'NORMAL'
-        END AS reason
-      FROM recent_latest r
-    `;
+    const snapKey = `${lookbackDays}:${offlineMin}`;
+let snapshot = getSnapshotCache(snapKey);
 
-    const noFaultSql = `
-      ${latestStatusCteNoFault()}
-      SELECT
-        r."rtuImei" AS imei,
-        r."opMode"  AS op_mode,
-        r.fault_flags,
-        r.last_time,
-        EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 AS minutes_since,
-        CASE
-          WHEN EXTRACT(EPOCH FROM (NOW() - r.last_time))/60.0 >= $2 THEN 'OFFLINE'
-          WHEN r."opMode" <> '0' THEN 'OPMODE_ABNORMAL'
-          ELSE 'NORMAL'
-        END AS reason
-      FROM recent_latest r
-    `;
+if (!snapshot) {
+  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+  setSnapshotCache(snapKey, snapshot);
+}
 
-    let baseRows;
-    try {
-      ({ rows: baseRows } = await pool.query(withFaultSql, [lookbackDays, offlineMin]));
-    } catch {
-      ({ rows: baseRows } = await pool.query(noFaultSql,   [lookbackDays, offlineMin]));
+const { devices } = snapshot;
+
+    let rows = devices.filter(d => d.reason !== 'NORMAL');
+    if (reasonFilter !== 'ALL') {
+      rows = rows.filter(d => d.reason === reasonFilter);
     }
-
-    let rows = baseRows.filter(r => r.reason !== 'NORMAL');
-    if (reasonFilter !== 'ALL') rows = rows.filter(r => r.reason === reasonFilter);
 
     if (!rows.length) return res.json({ ok: true, items: [] });
 
     const imeis = rows.map(r => r.imei);
-    let metaMap = new Map();
 
+    let metaMap = new Map();
     try {
       const { rows: metas } = await pool.query(
         `SELECT imei, address, sido, sigungu, lat, lon,
@@ -598,7 +652,8 @@ router.get('/abnormal/points', async (req, res, next) => {
         [imeis]
       );
       metaMap = new Map(metas.map(m => [m.imei, m]));
-    } catch {}
+    } catch (_) {
+    }
 
     if (mysqlPool) {
       const lacks = rows.filter(r => {
@@ -665,7 +720,7 @@ router.get('/abnormal/points', async (req, res, next) => {
         reason: r.reason,
         op_mode: r.op_mode,
         last_time: r.last_time,
-        minutes_since: Number(r.minutes_since?.toFixed?.(1) ?? r.minutes_since),
+        minutes_since: r.minutes_since,
 
         sido,
         sigungu,
@@ -680,11 +735,15 @@ router.get('/abnormal/points', async (req, res, next) => {
     }
 
     res.json({ ok: true, items });
+
   } catch (e) {
     next(e);
   }
 });
 
+// ──────────────────────────────────────────────────────────────
+//  정상 발전소 포인트 (지도 표시용)
+// ──────────────────────────────────────────────────────────────
 router.get('/normal/points', async (req, res) => {
   try {
     const lookbackDays = Number(req.query.lookbackDays || 3);
@@ -703,8 +762,6 @@ router.get('/normal/points', async (req, res) => {
         l.imei, 
         l."opMode" AS op_mode, 
         l.last_time,
-
-        -- ▼ worker 포함!
         m.sido, 
         m.sigungu, 
         m.address, 
@@ -714,7 +771,6 @@ router.get('/normal/points', async (req, res) => {
         m.type_hex,
         m.multi_count,
         m.worker
-
       FROM latest l
       LEFT JOIN public.imei_meta m ON m.imei = l.imei
       WHERE l."opMode" = '0'

@@ -11,11 +11,6 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
-
-// ---------------------
-// Rate limiter
-// ---------------------
-// 로그는 데이터양이 많으므로 1분에 20회로 제한
 const logsLimiter = rateLimit({
   windowMs: 60 * 1000, // 1분
   max: 20,             // 1분당 최대 25회
