@@ -1,16 +1,9 @@
-// server/routes/user.js
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
 const { mysqlPool } = require('../db/db.mysql');
 const { requireAuth } = require('../middlewares/requireAuth');
 
-/**
- * GET /user/imeis
- * 로그인한 사용자의 worker + phoneNumber로 rems_rems를 조회하여
- * 연결된 RTU의 rtuimei 목록을 반환한다.
- * 반환: { worker, phoneNumber, items:[{rtu_id, rtuImei, createdDate}], defaultImei }
- */
 router.get('/imeis', requireAuth, async (req, res) => {
   const client = await pool.connect();
   let mysqlConn;

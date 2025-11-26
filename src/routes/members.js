@@ -3,8 +3,6 @@ const router = express.Router();
 const { pool } = require('../db/db.pg');
 const { requireAuth } = require('../middlewares/requireAuth');
 
-// 관리자 여부 체크
-
 async function requireAdmin(req, res, next) {
   try {
     const { sub } = req.user || {};
@@ -26,7 +24,6 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-// 회원 목록 조회 (관리자만)
 router.get('/', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -41,7 +38,6 @@ router.get('/', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// 회원 정보 수정
 router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);

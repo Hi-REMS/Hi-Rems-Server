@@ -1,4 +1,3 @@
-// src/routes/weather.openMeteo.byPoint.js
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
@@ -27,15 +26,15 @@ router.get('/by-point', async (req, res) => {
       latitude: lat,
       longitude: lon,
       hourly: [
-        'temperature_2m',              // 기온
-        'apparent_temperature',        // 체감온도
-        'relative_humidity_2m',        // 습도(%)
-        'pressure_msl',                // 해면기압(hPa)
-        'cloud_cover',                 // 운량(%)
-        'windspeed_10m',               // 풍속(m/s)
-        'precipitation',               // 강수량(mm)
-        'precipitation_probability',   // 강수확률(%)
-        'weathercode'                  // 날씨 코드
+        'temperature_2m',
+        'apparent_temperature',
+        'relative_humidity_2m',
+        'pressure_msl',
+        'cloud_cover',
+        'windspeed_10m',
+        'precipitation',
+        'precipitation_probability',
+        'weathercode'
       ].join(','),
       timezone: 'Asia/Seoul',
       forecast_days: 1,
@@ -79,14 +78,14 @@ router.get('/by-point', async (req, res) => {
         return {
           date,
           hour: `${String(hour).padStart(2, '0')}:00`,
-          TA: Number(temperature_2m?.[i] ?? null),                 // 기온
-          TAF: Number(apparent_temperature?.[i] ?? null),          // 체감온도
-          RH: Number(relative_humidity_2m?.[i] ?? null),           // 습도
-          PRESS: Number(pressure_msl?.[i] ?? null),                // 기압
-          CLOUD: Number(cloud_cover?.[i] ?? null),                 // 운량
-          WSPD: Number(windspeed_10m?.[i] ?? null),                // 풍속
-          PRECIP: Number(precipitation?.[i] ?? 0),                 // 강수량
-          POP: Number(precipitation_probability?.[i] ?? 0),        // 강수확률
+          TA: Number(temperature_2m?.[i] ?? null),
+          TAF: Number(apparent_temperature?.[i] ?? null),
+          RH: Number(relative_humidity_2m?.[i] ?? null),
+          PRESS: Number(pressure_msl?.[i] ?? null),
+          CLOUD: Number(cloud_cover?.[i] ?? null),
+          WSPD: Number(windspeed_10m?.[i] ?? null),
+          PRECIP: Number(precipitation?.[i] ?? 0),
+          POP: Number(precipitation_probability?.[i] ?? 0),
           SKY,
           PTY,
           hourNum: hour

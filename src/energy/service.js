@@ -1103,50 +1103,91 @@ async function handleKPIOnly(req, res, next) {
     const useMulti =
       multiHex && MULTI_SUPPORTED(energyHex) ? multiHex : null;
 
-    const latest = await (useMulti
-      ? lastBeforeNowByMulti(imei, { energyHex, typeHex, multiHex: useMulti })
-      : lastBeforeNow(imei, energyHex, typeHex));
+    let latestRows = [];
 
-    if (!latest || !latest.body)
+    // 멀티 선택 X → 모든 멀티 조회해서 합산
+    if (!useMulti && MULTI_SUPPORTED(energyHex)) {
+      latestRows = await latestPerMulti(imei, { energyHex, typeHex });
+    } else {
+      const row = await (useMulti
+        ? lastBeforeNowByMulti(imei, { energyHex, typeHex, multiHex: useMulti })
+        : lastBeforeNow(imei, energyHex, typeHex));
+      if (row) latestRows = [row];
+    }
+
+    if (!latestRows.length || !latestRows.some(r => r.body)) {
       return res.status(422).json({ error: "NO_DATA" });
+    }
 
-    const pL = parseFrame(latest.body);
-    if (!pL?.ok || !pL.metrics)
-      return res.status(422).json({ error: "PARSE_FAIL" });
+    // -------------------------------
+    // BigInt 안전한 합산
+    // -------------------------------
+    let totalWhSum = 0;
+    let nowWSum = 0;
+    let effList = [];
 
-    const m = pL.metrics;
+    for (const r of latestRows) {
+      if (!r.body) continue;
 
-    const firstToday = await firstAfterAtMidnight(
-      imei,
-      energyHex,
-      typeHex,
-      useMulti
-    );
+      const p = parseFrame(r.body);
+      if (!p?.ok || !p.metrics) continue;
+      const m = p.metrics;
 
-    let firstWh = null;
-    if (firstToday?.body) {
-      const pF = parseFrame(firstToday.body);
-      if (pF?.ok && pF.metrics?.cumulativeWh != null) {
-        firstWh = Number(pF.metrics.cumulativeWh);
+      if (m.cumulativeWh != null) {
+        totalWhSum += Number(m.cumulativeWh); // BigInt → Number 변환
+      }
+
+      if (m.currentOutputW != null) {
+        nowWSum += Number(m.currentOutputW);
+      }
+
+      if (m.inverterEfficiencyPct != null) {
+        effList.push(Number(m.inverterEfficiencyPct));
       }
     }
 
-    let today_kwh = null;
-    if (firstWh != null && m.cumulativeWh != null) {
-      const diffWh = Number(m.cumulativeWh) - firstWh;
-      today_kwh = diffWh > 0 ? Math.round((diffWh / 1000) * 100) / 100 : 0;
+    const total_kwh =
+      totalWhSum > 0 ? Math.round((totalWhSum / 1000) * 100) / 100 : null;
+
+    const now_kw =
+      nowWSum > 0 ? Math.round((nowWSum / 1000) * 100) / 100 : null;
+
+    const inverter_efficiency_pct =
+      effList.length
+        ? Math.round(
+            (effList.reduce((a, b) => a + b, 0) / effList.length) * 10
+          ) / 10
+        : null;
+
+    // -------------------------------
+    // 오늘 발전량 계산(멀티 합산)
+    // -------------------------------
+    let todayWhSum = 0;
+
+    for (const r of latestRows) {
+      const parts = (r.body || "").split(/\s+/);
+      const multi = parts[3] || "00";
+
+      const firstRow = await firstAfterAtMidnight(
+        imei,
+        energyHex,
+        typeHex,
+        multi
+      );
+
+      if (!firstRow || !firstRow.body) continue;
+
+      const latestWh = parseFrame(r.body)?.metrics?.cumulativeWh;
+      const firstWh = parseFrame(firstRow.body)?.metrics?.cumulativeWh;
+
+      if (latestWh != null && firstWh != null) {
+        const diff = Number(latestWh) - Number(firstWh); // BigInt → Number 변환
+        if (diff > 0) todayWhSum += diff;
+      }
     }
 
-    let now_kw = null;
-    if (m.currentOutputW != null)
-      now_kw = Math.round((m.currentOutputW / 1000) * 100) / 100;
-
-    let total_kwh = null;
-    if (m.cumulativeWh != null)
-      total_kwh = Math.round((Number(m.cumulativeWh) / 1000) * 100) / 100;
-
-    let inverter_efficiency_pct =
-      m.efficiencyPct ?? m.inverterEfficiencyPct ?? null;
+    const today_kwh =
+      todayWhSum > 0 ? Math.round((todayWhSum / 1000) * 100) / 100 : 0;
 
     const co2Factor = CO2_FOR(energyHex);
     const co2_kg =
@@ -1158,8 +1199,8 @@ async function handleKPIOnly(req, res, next) {
       fast: true,
       deviceInfo: {
         imei,
-        latestAt: latest.time,
         energy: energyHex,
+        latestAt: latestRows[0]?.time || null,
       },
       kpis: {
         now_kw,
@@ -1173,8 +1214,6 @@ async function handleKPIOnly(req, res, next) {
     next(err);
   }
 }
-
-
 
 router.get('/kpi-fast', limiterKPI, handleKPIOnly);
 
@@ -1230,6 +1269,16 @@ router.get('/ess/hourly',              limiterHourly,   (req,res,n)=>handleHourl
 router.use((err, req, res, next) => {
   console.error('[EnergyService Error]', err);
 
+  if (err.matches && Array.isArray(err.matches)) {
+    return res.status(422).json({ // 혹은 300(Multiple Choices) 써도 됨
+      ok: false,
+      code: "MULTIPLE_MATCHES",
+      message: "여러 장비가 검색되었습니다. 하나를 선택해주세요.",
+      matches: err.matches // [{imei, name, address...}, ...]
+    });
+  }
+
+  // 2. 기존 로직: 데이터 없음 처리
   if (err.status === 422 || err.message?.includes('no_frame')) {
     return res.status(422).json({
       ok: false,
@@ -1238,6 +1287,7 @@ router.use((err, req, res, next) => {
     });
   }
 
+  // 3. 기존 로직: 파싱 실패
   if (err.message?.includes('parse_fail') || err.message?.includes('파싱')) {
     return res.status(422).json({
       ok: false,
@@ -1246,6 +1296,7 @@ router.use((err, req, res, next) => {
     });
   }
 
+  // 4. 기존 로직: 타임아웃
   if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
     return res.status(504).json({
       ok: false,
@@ -1254,20 +1305,12 @@ router.use((err, req, res, next) => {
     });
   }
 
-  if (err.status === 429) {
-    return res.status(429).json({
-      ok: false,
-      code: "RATE_LIMIT",
-      message: "요청이 너무 많습니다. 잠시 후 다시 시도하세요."
-    });
-  }
-
-  return res.status(500).json({
+  // 5. 기타 서버 에러
+  return res.status(err.status || 500).json({
     ok: false,
     code: "SERVER_ERROR",
     message: err.message || "서버 오류가 발생했습니다."
   });
 });
-
 
 module.exports = router;

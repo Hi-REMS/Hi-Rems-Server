@@ -1,17 +1,11 @@
-// src/routes/facility.upload.js
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { requireAuth } = require('../middlewares/requireAuth');
-
 const router = express.Router();
-
-// 업로드 디렉토리 설정
-
 const uploadDir = '/var/www/html/uploads/facility';
 fs.mkdirSync(uploadDir, { recursive: true });
-
 
 function getKSTTimestamp() {
   const now = new Date();

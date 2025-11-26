@@ -1,4 +1,3 @@
-// src/routes/weather.openMeteo.byImei.daily.js
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
@@ -7,7 +6,6 @@ const { mysqlPool } = require('../db/db.mysql');
 const { nearestAsos } = require('../utils/nearestAsos');
 const KAKAO_REST_KEY = process.env.KAKAO_REST_KEY;
 
-// IMEI → CID(Postgres) → 주소(MySQL)
 async function resolveImeiMeta(imei) {
   const { rows } = await pool.query(
     `SELECT "cid" FROM public.log_remssendlog
@@ -28,7 +26,6 @@ async function resolveImeiMeta(imei) {
   return { found: true, cid, address: row.address || null };
 }
 
-// 지오코딩(카카오)
 async function geocodeAddress(addr) {
   if (!addr || !KAKAO_REST_KEY) return null;
   try {
@@ -48,7 +45,6 @@ async function geocodeAddress(addr) {
   }
 }
 
-// Open-Meteo weathercode → 하늘/강수 텍스트
 function wcToSkyPty(wc) {
   if (wc === 0) return { sky: '맑음', pty: '없음' };
   if ([1, 2, 3].includes(wc)) return { sky: '구름많음', pty: '없음' };
@@ -57,7 +53,6 @@ function wcToSkyPty(wc) {
   return { sky: '흐림', pty: '없음' };
 }
 
-// GET /api/weather/openmeteo/by-imei/daily
 router.get('/by-imei/daily', async (req, res) => {
   try {
     const imei = String(req.query.imei || '').trim();

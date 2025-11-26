@@ -1,16 +1,3 @@
-// src/energy/parser.js
-// 에너지 계측 장치로부터 수집된 Hex 프레임을 파싱하는 모듈
-// - 지원 에너지 타입:
-//   · 태양광 단상 (energy=0x01, type=0x01)
-//   · 태양광 삼상 (energy=0x01, type=0x02)
-//   · 태양열 강제순환식 (energy=0x02, type=0x01)
-//   · 태양열 자연순환식 (energy=0x02, type=0x02)
-//   · 지열 히트펌프   (energy=0x03, type=0x01)
-//   · 지열 부하측     (energy=0x03, type=0x02)
-//   · 풍력            (energy=0x04, type=0x01)
-// - 출력: { ok, command, energy, energyName, type, typeName, multi, errCode, metrics{...} }
-//   ※ 누적 에너지는 전기/열/풍력 모두 metrics.cumulativeWh(BigInt, Wh) 로 통일
-
 const BUILD = 'parser-geo+wind+fuelcell+ess-2025-10-31b';
 
 
@@ -79,7 +66,6 @@ const u64 = (a, i) =>
   (BigInt(a[i + 6]) << 8n) |
   BigInt(a[i + 7]);
 
-// 멀티 슬롯
 const getMulti = (m) =>
   (m === 0x00 ? 1 : m === 0x01 ? 2 : m === 0x02 ? 3 : m === 0x03 ? 4 : 1);
 
@@ -110,18 +96,17 @@ function temp10_from2bytes(a, i) {
   return signNibble === 0x0 ? val : -val;
 }
 
-// 태양열 파서 (강제/자연)
 function parseSolarThermalForced(bytes, off = 5) {
-  const inlet    = temp10_from2bytes(bytes, off + 0); // 집열기 입구
-  const outlet   = temp10_from2bytes(bytes, off + 2); // 집열기 출구
-  const tankTop  = temp10_from2bytes(bytes, off + 4); // 축열조 상부
-  const tankBot  = temp10_from2bytes(bytes, off + 6); // 축열조 하부
-  const flowLpm  = u32(bytes, off + 8)  / 10;         // 유량(LPM, 10배)
-  const prodKcal = Number(u64(bytes, off + 12)) / 100; // 누적 생산(kcal, 100배)
-  const coldT    = temp10_from2bytes(bytes, off + 20); // 급수
-  const hotT     = temp10_from2bytes(bytes, off + 22); // 급탕
-  const useFlow  = u32(bytes, off + 24) / 10;          // 소비 유량(LPM, 10배)
-  const useKcal  = Number(u64(bytes, off + 28)) / 100; // 누적 사용(kcal, 100배)
+  const inlet    = temp10_from2bytes(bytes, off + 0);
+  const outlet   = temp10_from2bytes(bytes, off + 2);
+  const tankTop  = temp10_from2bytes(bytes, off + 4);
+  const tankBot  = temp10_from2bytes(bytes, off + 6);
+  const flowLpm  = u32(bytes, off + 8)  / 10;
+  const prodKcal = Number(u64(bytes, off + 12)) / 100;
+  const coldT    = temp10_from2bytes(bytes, off + 20);
+  const hotT     = temp10_from2bytes(bytes, off + 22);
+  const useFlow  = u32(bytes, off + 24) / 10;
+  const useKcal  = Number(u64(bytes, off + 28)) / 100;
   const fault    = u16(bytes, off + 36);
   const faultList = faultBitsToList(fault, THERMAL_FAULT_MAP);
 
@@ -148,10 +133,10 @@ function parseSolarThermalForced(bytes, off = 5) {
 }
 
 function parseSolarThermalNatural(bytes, off = 5) {
-  const coldT    = temp10_from2bytes(bytes, off + 0);  // 급수배관
-  const hotT     = temp10_from2bytes(bytes, off + 2);  // 급탕배관
-  const flowLpm  = u32(bytes, off + 4)  / 10;          // 유량(LPM, 10배)
-  const useKcal  = Number(u64(bytes, off + 8)) / 100;  // 누적 사용(kcal, 100배)
+  const coldT    = temp10_from2bytes(bytes, off + 0);
+  const hotT     = temp10_from2bytes(bytes, off + 2);
+  const flowLpm  = u32(bytes, off + 4)  / 10;
+  const useKcal  = Number(u64(bytes, off + 8)) / 100;
   const fault    = u16(bytes, off + 16);
   const faultList = faultBitsToList(fault, THERMAL_FAULT_MAP);
 
@@ -174,7 +159,6 @@ function parseSolarThermalNatural(bytes, off = 5) {
   };
 }
 
-// 지열 파서
 function parseGeothermalHeatPumpExact(bytes, off = 5) {
   if (bytes.length < off + 41) return { short: true };
 
@@ -264,7 +248,6 @@ function parseGeothermalLoadExact(bytes, off = 5) {
   };
 }
 
-// 풍력 파서 
 function parseWindExact(bytes, off = 5) {
   if (bytes.length < off + 24) return { short: true };
 
@@ -294,7 +277,6 @@ function parseWindExact(bytes, off = 5) {
   };
 }
 
-// 메인 파서
 function parseFrame(hex) {
   const b = toBytes(hex);
   if (b.length < 5) return { ok: false, reason: 'short' };
@@ -336,7 +318,6 @@ function parseFrame(hex) {
     return { ...out, ok: false, reason: ERR_LABEL[err] || 'device_error' };
   }
 
-  // ───────── 태양광 단상 (0x01/0x01)
   if (energy === 0x01 && type === 0x01) {
     if (b.length < 21) return { ...out, ok: false, reason: 'short_single' };
 
@@ -380,7 +361,6 @@ function parseFrame(hex) {
     return out;
   }
 
-  // ───────── 태양광 삼상 (0x01/0x02)
   if (energy === 0x01 && type === 0x02) {
     if (b.length < 33) return { ...out, ok: false, reason: 'short_three' };
 
@@ -435,9 +415,8 @@ function parseFrame(hex) {
     return out;
   }
 
-  // ───────── 태양열 (0x02/0x01, 0x02)
   if (energy === 0x02) {
-    if (type === 0x01) { // 강제순환식(38B)
+    if (type === 0x01) {
       if (b.length < 5 + 38) return { ...out, ok: false, reason: 'short_thermal_forced' };
       const m = parseSolarThermalForced(b, 5);
       out.metrics = {
@@ -461,7 +440,7 @@ function parseFrame(hex) {
       return out;
     }
 
-    if (type === 0x02) { // 자연순환식(18B)
+    if (type === 0x02) {
       if (b.length < 5 + 18) return { ...out, ok: false, reason: 'short_thermal_natural' };
       const m = parseSolarThermalNatural(b, 5);
       out.metrics = {
@@ -479,9 +458,8 @@ function parseFrame(hex) {
     }
   }
 
-  // ───────── 지열 (0x03/0x01, 0x02)
   if (energy === 0x03) {
-    if (type === 0x01) { // 히트펌프(41B)
+    if (type === 0x01) {
       if (b.length < 5 + 41) return { ...out, ok: false, reason: 'short_geothermal_hp' };
       const m = parseGeothermalHeatPumpExact(b, 5);
       if (m.short) return { ...out, ok: false, reason: 'short_geothermal_hp' };
@@ -489,7 +467,7 @@ function parseFrame(hex) {
       return out;
     }
 
-    if (type === 0x02) { // 부하측(34B)
+    if (type === 0x02) {
       if (b.length < 5 + 34) return { ...out, ok: false, reason: 'short_geothermal_load' };
       const m = parseGeothermalLoadExact(b, 5);
       if (m.short) return { ...out, ok: false, reason: 'short_geothermal_load' };
@@ -498,7 +476,6 @@ function parseFrame(hex) {
     }
   }
 
-  // ───────── 풍력 (0x04/0x01)
   if (energy === 0x04) {
     if (type === 0x00) {
       return { ...out, ok: false, reason: 'wind_heartbeat_only', metrics: {} };
@@ -512,7 +489,6 @@ function parseFrame(hex) {
     }
   }
 
-  // ───────── 연료전지 (0x06/0x01)
   if (energy === 0x06 && type === 0x01) {
     if (b.length < 5 + 56) return { ...out, ok: false, reason: 'short_fuelcell' };
     const m = parseFuelCellExact(b, 5);
@@ -521,7 +497,6 @@ function parseFrame(hex) {
     return out;
   }
 
-  // ───────── ESS (0x07/0x01)
   if (energy === 0x07 && type === 0x01) {
     if (b.length < 5 + 31) return { ...out, ok: false, reason: 'short_ess' };
     const m = parseESSExact(b, 5);
@@ -531,8 +506,6 @@ function parseFrame(hex) {
   }
   return out;
 }
-
-
 
 function parseFuelCellExact(bytes, off = 5) {
   if (bytes.length < off + 56) return { short: true };
@@ -577,8 +550,6 @@ function parseFuelCellExact(bytes, off = 5) {
     isOperating,
   };
 }
-
-// ESS 파서 (0x07/0x01) — tail-robust
 
 function parseESSExact(bytes, off = 5) {
   if (bytes.length < off + 10) return { short: true };

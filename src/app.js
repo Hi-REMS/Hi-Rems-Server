@@ -28,7 +28,6 @@ app.use(cors({
   credentials: true,
 }));
 
-// ──────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, uptime: process.uptime() });
 });
@@ -42,7 +41,6 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
-// API
 app.use('/api', api);
 
 app.get('/api/health-direct', async (_req, res) => {
@@ -55,10 +53,8 @@ app.get('/api/health-direct', async (_req, res) => {
   }
 });
 
-// 크론잡
 setupEnergyCron();
 
-// 정상 발전소 데이터 프리로드
 const dist = path.join(__dirname, '../frontend/dist');
 app.get(/^\/(?!api\/).*/, async (req, res, next) => {
   try {
@@ -81,7 +77,6 @@ app.get(/^\/(?!api\/).*/, async (req, res, next) => {
   }
 });
 
-// 오류 핸들러
 app.use((err, _req, res, _next) => {
   console.error(err);
   const status = err.status || 500;

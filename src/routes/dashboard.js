@@ -1,15 +1,9 @@
-// 대시보드 요약/건강 지표 API 라우트 (지역 위험도 집계 + 5분 캐시 포함)
-
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
 const { parseFrame } = require('../energy/parser');
 const { mysqlPool } = require('../db/db.mysql');
-
-// ──────────────────────────────────────────────────────────────
-//  캐시 유틸 (주로 /basic 에서 사용)
-// ──────────────────────────────────────────────────────────────
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map();
 
@@ -44,9 +38,6 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-// ──────────────────────────────────────────────────────────────
-//  Rate limiters
-// ──────────────────────────────────────────────────────────────
 const limiterBasic = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
@@ -71,9 +62,6 @@ const limiterAbnormal = rateLimit({
   legacyHeaders: false,
 });
 
-// ──────────────────────────────────────────────────────────────
-//  주소 파싱/조인 유틸
-// ──────────────────────────────────────────────────────────────
 function normalizeSido(sido) {
   const map = {
     '강원': '강원도',
@@ -126,22 +114,10 @@ async function fetchAddressMap(imeis) {
       });
     }
   } catch (_) {
-    // 무시
   }
   return result;
 }
 
-// ──────────────────────────────────────────────────────────────
-//  공통 헬퍼: IMEI별 건강 상태 스냅샷 계산
-//  - lookbackDays 기간 안의 "마지막 프레임" + 최근 1시간 프레임 전체를 같이 사용
-//  - 최근 1시간 프레임 중 bit0=1 이 하나라도 있으면 FAULT
-//  - 최근 1시간 프레임이 0개이고 offlineMin 이상 미수신이면 OFFLINE
-//  - 나머지는 OPMODE 기반 판단
-// ──────────────────────────────────────────────────────────────
-
-/**
- * @returns {Promise<{ devices: Array, byImei: Map<string, any> }>}
- */
 async function computeHealthSnapshot(lookbackDays, offlineMin) {
   const { rows: latestRows } = await pool.query(
     `
@@ -266,13 +242,6 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
   return { devices, byImei };
 }
 
-
-
-
-
-// ──────────────────────────────────────────────────────────────
-//  기본 대시보드 지표 (5분 캐시)
-// ──────────────────────────────────────────────────────────────
 router.get('/basic', limiterBasic, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
@@ -340,9 +309,6 @@ const normal_plants   = total_plants - abnormal_plants;
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  이상 발전소 목록 (상세 리스트) — 메타데이터 포함 버전
-// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -460,9 +426,6 @@ router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  이상 발전소 요약 브레이크다운
-// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/summary', limiterAbnormal, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -499,9 +462,6 @@ const { devices } = snapshot;
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  이상 발전소 지역별 요약
-// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/by-region', async (req, res) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
@@ -586,9 +546,6 @@ const { devices } = snapshot;
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  전국 에너지 요약 (/energy)
-// ──────────────────────────────────────────────────────────────
 router.get('/energy', limiterEnergy, async (_req, res, next) => {
   try {
     const { getCache } = require('../jobs/energyRefresh');
@@ -611,9 +568,6 @@ router.get('/energy', limiterEnergy, async (_req, res, next) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  이상 발전소 포인트 (지도 표시용)
-// ──────────────────────────────────────────────────────────────
 router.get('/abnormal/points', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
@@ -741,9 +695,6 @@ const { devices } = snapshot;
   }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  정상 발전소 포인트 (지도 표시용)
-// ──────────────────────────────────────────────────────────────
 router.get('/normal/points', async (req, res) => {
   try {
     const lookbackDays = Number(req.query.lookbackDays || 3);

@@ -1,4 +1,3 @@
-// src/jobs/normalPointsCache.js
 const { pool } = require('../db/db.pg');
 
 let cache = { at: 0, data: [] };

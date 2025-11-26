@@ -1,5 +1,3 @@
-/* 커넥션 풀 생성하는 모듈, Promise 기반 API로 await를 써서 query, getConnection 등을 호출 */
-// src/db/db.mysql.js
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 

@@ -1,4 +1,3 @@
-// src/routes/weather.openMeteo.byImei.js
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
@@ -6,7 +5,6 @@ const { pool } = require('../db/db.pg');
 const { mysqlPool } = require('../db/db.mysql');
 const KAKAO_REST_KEY = process.env.KAKAO_REST_KEY;
 
-// IMEI → CID → 주소
 async function resolveImeiMeta(imei) {
   const { rows } = await pool.query(
     `SELECT "cid"
@@ -51,7 +49,6 @@ async function geocodeAddress(addr) {
   }
 }
 
-// GET /api/weather/openmeteo/by-imei
 router.get('/by-imei', async (req, res) => {
   try {
     const imei = String(req.query.imei || '').trim();

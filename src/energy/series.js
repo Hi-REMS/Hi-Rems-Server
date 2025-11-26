@@ -1,5 +1,3 @@
-// src/energy/series.js
-
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
@@ -17,9 +15,9 @@ const MIN_BODYLEN_WITH_WH = 12;
 const LEN_WITH_WH_COND = `COALESCE("bodyLength", 9999) >= ${MIN_BODYLEN_WITH_WH}`;
 
 const RECENT_WINDOW_BY_ENERGY = {
-  '01': 30,
-  '02': 30,
-  '03': 7,
+  '01': 365,
+  '02': 365,
+  '03': 365,
   '04': 14,
   '06': 14,
   '07': 14,
@@ -113,9 +111,27 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       endUtc   = kstEndExclusiveUtc(endQ);
       bucket   = 'day';
     } else if (range === 'yearly') {
-      endUtc = new Date();
-      startUtc = new Date(Date.now() - 30 * 86400 * 1000); 
-      bucket = 'day'; 
+      // KST 기준 지금 시각
+      const nowKST = new Date(
+        new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' })
+      );
+
+      // 조회 연도: 예) 2024, 2025 (없으면 현재 연도)
+      const year = Number(req.query.year) || nowKST.getFullYear();
+
+      // 조회 연도 1월 1일 00:00 KST → UTC로 변환(-9h)
+      startUtc = new Date(Date.UTC(year, 0, 1, -9));
+
+      // [수정] 과거 연도(2023 등) 조회 시 종료 시점은 그 해 12월 31일로 고정
+      if (year < nowKST.getFullYear()) {
+        // 해당 연도 12월 31일 23:59:59 KST
+        endUtc = new Date(Date.UTC(year, 11, 31, 23, 59, 59, -9));
+      } else {
+        // 올해라면 현재 시각까지
+        endUtc = nowKST;
+      }
+
+      bucket = 'day';  // 일 단위 집계
     } else {
       const r = getRangeUtc(range);
       startUtc = r.startUtc;
@@ -123,7 +139,9 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       bucket = r.bucket;
     }
 
-    const limitDays = RECENT_WINDOW_BY_ENERGY[energyHex];
+    // [수정] yearly 모드일 때는 365일 제한 로직을 건너뜀 (null 처리)
+    const limitDays = (range === 'yearly') ? null : RECENT_WINDOW_BY_ENERGY[energyHex];
+    
     if (limitDays) {
       const maxWindowMs = limitDays * 86400 * 1000;
       const requestedDiff = endUtc.getTime() - startUtc.getTime();
@@ -146,6 +164,9 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
 
     const params = [imei, startUtc, endUtc];
 
+    // [수정] 인덱스(split_part)를 활용하기 위해 주석 해제!
+    if (energyHex) conds.push(`body LIKE '14 ${energyHex} %'`);
+
     const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
     if (tc.sql) conds.push(tc.sql);
 
@@ -163,6 +184,7 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const { rows } = await pool.query(sql, params);
     const perKey = new Map();
 
+    // [샘플링 설정] 태양광(01)은 0(모두 처리), 그 외는 10분 단위
     let SAMPLE_INTERVAL_MS = (energyHex === '01') ? 0 : 10 * 60 * 1000;
     let lastProcessedTime = 0;
 
@@ -173,21 +195,25 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
       const isFirst = (i === 0);
       const isLast  = (i === rows.length - 1);
 
+      // 1. [수정] 에너지원 검증을 가장 먼저 수행
+      const head = headerFromHex(r.body);
+      if (energyHex && head.energyHex !== energyHex) {
+         continue; 
+      }
+
+      // 2. [수정] 그 다음 샘플링 체크
       if (!isFirst && !isLast && SAMPLE_INTERVAL_MS > 0) {
         if (currentTime - lastProcessedTime < SAMPLE_INTERVAL_MS) {
           continue; 
         }
       }
 
+      // 3. 파싱
       const p = parseFrame(r.body); 
       const wh = p?.metrics?.cumulativeWh ?? null;
       if (wh == null) continue;
 
-      const head = headerFromHex(r.body);
-      if (energyHex && head.energyHex !== energyHex) {
-         continue;
-      }
-
+      // 4. [수정] 모든 관문을 통과했을 때만 시간 갱신
       lastProcessedTime = currentTime;
 
       const m = MULTI_SUPPORTED(head.energyHex)
@@ -270,6 +296,11 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
         const currentTime = t.getTime();
         const isLast = (i === rows.length - 1);
         
+        // [수정] 상세 데이터도 에너지 검증을 먼저 수행
+        const head = headerFromHex(r.body);
+        if (energyHex && head.energyHex !== energyHex) continue;
+
+        // [수정] 그 다음 샘플링
         if (!isLast && HOURLY_SAMPLE_MS > 0 && (currentTime - lastHourlyProcessedTime < HOURLY_SAMPLE_MS)) {
              continue;
         }
@@ -278,9 +309,7 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
         const wh = p?.metrics?.cumulativeWh ?? null;
         if (wh == null) continue;
         
-        const head = headerFromHex(r.body);
-        if (energyHex && head.energyHex !== energyHex) continue;
-
+        // [수정] 통과 후 시간 갱신
         lastHourlyProcessedTime = currentTime;
 
         const m = MULTI_SUPPORTED(head.energyHex) ? (head.multi || '00') : '00';

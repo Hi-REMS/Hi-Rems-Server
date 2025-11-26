@@ -51,10 +51,9 @@ router.use('/weather/asos', asosDailyRoutes);
 router.use('/energy', energySeriesRoutes);
 router.use('/energy', energyRoutes);
 
-// === 익스포트 ===
 router.use('/export', exportMonthCsvRoutes);
 
-// === 인증/사용자/설비/유지보수 ===
+// === 인증/사용자/설비/유지보수
 router.use('/auth',        authRoutes);
 router.use('/user',        userRoutes);
 router.use('/facility',    facilityRoutes);

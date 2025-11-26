@@ -15,5 +15,5 @@ node_modules/
 Thumbs.db
 .vscode/
 
-# 빌드 결과물 (필요하다면)
+# 빌드 결과물
 dist/

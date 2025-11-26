@@ -1,7 +1,3 @@
-// src/routes/rems.js
-// REMS 데이터 조회 및 집계 API (MySQL)
-// + 카카오 JS 키 전달 / 지오코딩 프록시 포함
-
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -9,9 +5,6 @@ const rateLimit = require('express-rate-limit');
 const { mysqlPool } = require('../db/db.mysql');
 const { pool: pg } = require('../db/db.pg'); 
 
-// ---------------------
-// Rate limiters
-// ---------------------
 const makeLimiter = (maxPerMin) =>
   rateLimit({
     windowMs: 60 * 1000,
@@ -21,25 +14,18 @@ const makeLimiter = (maxPerMin) =>
     legacyHeaders: false,
   });
 
-// 외부 API 프록시는 더 엄격하게
 const limiterKey      = makeLimiter(20); // /kakao-jskey
 const limiterGeocode  = makeLimiter(15); // /geocode (외부 API 호출)
 const limiterList     = makeLimiter(30); // / (목록 조회)
 const limiterAggSido  = makeLimiter(20); // /agg/sido
 const limiterAggSigu  = makeLimiter(30); // /agg/sigungu
 
-// =====================
-// 카카오 JS키 전달
-// =====================
 router.get('/kakao-jskey', limiterKey, (_req, res) => {
   const key = process.env.KAKAO_JS_KEY || '';
   if (!key) return res.status(500).json({ error: 'KAKAO_JS_KEY is not configured' });
   res.json({ key });
 });
 
-// =====================
-// 카카오 로컬 지오코딩 프록시(REST 키 사용, 상세주소 포함)
-// =====================
 router.get('/geocode', limiterGeocode, async (req, res, next) => {
   try {
     const query = (req.query.query || '').trim();
@@ -102,9 +88,6 @@ router.get('/geocode', limiterGeocode, async (req, res, next) => {
   }
 });
 
-
-// REMS 장비 목록 조회
-
 router.get('/', limiterList, async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
@@ -133,7 +116,6 @@ router.get('/', limiterList, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// GET /api/rems/agg/sido
 router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
   try {
     const sql = `
@@ -184,8 +166,6 @@ router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
     res.json(rows.map(r => ({ name: r.name || '기타/미상', count: Number(r.count) })));
   } catch (e) { next(e); };
 });
-
-// ex ) GET /api/rems/agg/sigungu?sido=경기도
 
 router.get('/agg/sigungu', limiterAggSigu, async (req, res, next) => {
   try {

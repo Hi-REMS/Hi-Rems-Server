@@ -1,4 +1,3 @@
-// middlewares/requireAuth.js
 const jwt = require('jsonwebtoken');
 
 function cookieOpts() {
@@ -13,11 +12,6 @@ function cookieOpts() {
   };
 }
 
-/**
- * AccessToken 발급함수
- * @param {{ sub: string|number, username: string }} payload
- * @param {number=} sess  // 최초 로그인 시각(ms). 슬라이딩 갱신 시 유지
- */
 function signAccessToken(payload, sess) {
   if (!payload || payload.sub == null || !payload.username) {
     throw new Error('signAccessToken: payload must include { sub, username }');
@@ -43,22 +37,20 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET, {
-      algorithms: ['HS256'],   // 비밀번호 해시 알고리즘 HS256
+      algorithms: ['HS256'],
       clockTolerance: 5,
     });
 
-    // --- 절대 세션 만료(예: 1시간) ---
     const sess = typeof payload.sess === 'number'
       ? payload.sess
       : (payload.iat ? payload.iat * 1000 : Date.now());
 
     const now = Date.now();
-    const ABSOLUTE_MAX_MS = 60 * 60 * 1000; // 1h
+    const ABSOLUTE_MAX_MS = 60 * 60 * 1000;
     if (now - sess > ABSOLUTE_MAX_MS) {
       return res.status(401).json({ message: 'Session expired' });
     }
 
-    // --- 슬라이딩 만료: 만료 5분 전이면 새 토큰을 재발급해서 쿠키에 세팅 ---
     const expMs = payload.exp * 1000;
     const willExpireSoon = expMs - now <= 5 * 60 * 1000;
     if (willExpireSoon && res.cookie) {
@@ -69,7 +61,6 @@ function requireAuth(req, res, next) {
       res.cookie('access_token', newAccess, cookieOpts());
     }
 
-    // 요청 객체에 사용자 정보 주입
     req.user = { sub: payload.sub, username: payload.username };
     return next();
   } catch (e) {

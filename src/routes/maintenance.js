@@ -1,4 +1,3 @@
-// routes/maintenance.js
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db/db.pg');
@@ -24,7 +23,6 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-/** GET /api/maintenance?rtuImei=xxx */
 router.get('/', requireAuth, limiter, async (req, res) => {
   try {
     const rtuImei = String(req.query.rtuImei || '').trim();
@@ -43,7 +41,6 @@ router.get('/', requireAuth, limiter, async (req, res) => {
   }
 });
 
-/** PUT /api/maintenance/:rtuImei  { lastInspection, asNotes }  */
 router.put('/:rtuImei', requireAuth, limiter, async (req, res) => {
   try {
     const rtuImei = String(req.params.rtuImei || '').trim();

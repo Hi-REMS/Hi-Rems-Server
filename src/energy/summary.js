@@ -1,6 +1,3 @@
-// src/energy/summary.js
-// 전국 에너지 집계 (전기/열) — MV 우선, 원본 최근구간 fallback
-
 const { pool } = require('../db/db.pg');
 
 const ELECTRIC_CO2_PER_KWH = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.466'); 

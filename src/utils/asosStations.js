@@ -1,7 +1,3 @@
-// 기상청 ASOS 전국 종관기상관측소 전체 목록
-// stnId: 기상청 관측소 코드
-// name : 관측소 한글 이름
-// lat, lon : 위경도 좌표
 module.exports = [
   { stnId: 90, name: '속초', lat: 38.2500, lon: 128.5667 },
   { stnId: 93, name: '철원', lat: 38.1467, lon: 127.3044 },

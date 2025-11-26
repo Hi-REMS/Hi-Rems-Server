@@ -1,4 +1,3 @@
-// routes/auth.js
 const express = require('express');
 const argon2 = require('argon2');
 const rateLimit = require('express-rate-limit');
@@ -10,7 +9,6 @@ const { requireAuth, cookieOpts, signAccessToken } = require('../middlewares/req
 
 const router = express.Router();
 
-/* 공통 유틸 */
 function clientInfo(req) {
   return {
     ip: req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || null,
@@ -31,7 +29,6 @@ async function logLoginAttempt({ member_id = null, username = null, success, ip,
   }
 }
 
-/* 비밀번호 정책 */
 function validatePassword(pw, username) {
   const errors = [];
   if (!pw || pw.length < 8) errors.push('8자 이상이어야 합니다.');
@@ -45,7 +42,6 @@ function validatePassword(pw, username) {
   return errors;
 }
 
-/* SMTP: 설정 없으면 콘솔 폴백 */
 async function sendMail({ to, subject, text, html }) {
   const { SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS } = process.env;
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
@@ -62,14 +58,12 @@ async function sendMail({ to, subject, text, html }) {
   await transporter.sendMail({ from: `"Hi-REMS" <${SMTP_USER}>`, to, subject, text, html });
 }
 
-/* 재설정 토큰 */
 function createResetToken() {
   const token = crypto.randomBytes(32).toString('base64url');
   const hash = crypto.createHash('sha256').update(token).digest('base64url');
   return { token, hash };
 }
 
-/* Rate Limit */
 const loginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 50,
@@ -83,7 +77,6 @@ const forgotLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// 회원가입
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -274,7 +267,6 @@ router.post('/change-password', requireAuth, async (req, res) => {
   }
 });
 
-/* 로그아웃 / 내 정보 */
 router.post('/logout', (req, res) => {
   res.clearCookie('access_token', cookieOpts()).json({ ok: true });
 });
@@ -283,7 +275,6 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-/* 비밀번호 찾기/재설정 */
 router.post('/forgot', forgotLimiter, async (req, res) => {
   const client = await pool.connect();
   try {

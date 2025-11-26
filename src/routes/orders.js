@@ -1,11 +1,3 @@
-// src/routes/orders.js
-// 주문 데이터 조회 API 라우트
-// - GET /api/orders
-//   • PostgreSQL 테이블 public.orders 에서 주문 목록 조회
-//   • 페이징 지원: limit(기본 50, 최대 200), offset
-//   • 반환 필드: id, product, qty, status
-// - 응답: JSON 배열 [{ id, product, qty, status }]
-
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db/db.pg');

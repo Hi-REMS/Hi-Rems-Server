@@ -1,4 +1,3 @@
-// scripts/sync-imei-meta.js
 require('dotenv').config();
 
 const { parseFrame } = require('../src/energy/parser');
@@ -207,11 +206,11 @@ WHERE COALESCE(rems.address, '') <> '';
       );
     }
 
-    console.log('✅ 완료:', { processed, geocoded });
+    console.log('완료:', { processed, geocoded });
     process.exit(0);
 
   } catch (e) {
-    console.error('❌ 실패:', e);
+    console.error('실패:', e);
     process.exit(1);
   }
 })();

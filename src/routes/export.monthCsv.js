@@ -1,6 +1,3 @@
-// src/routes/export.monthCsv.js
-// 월별 CSV 익스포트 (태양광 분석용: 일사량/일조시간/구름량 포함)
-
 const express = require('express');
 const axios = require('axios');
 const { LRUCache } = require('lru-cache');
@@ -21,7 +18,6 @@ function monthStartEnd(year, month) {
   return { start, end, startStr, endStr };
 }
 
-// 구름량(%)
 function cloudStatus(v) {
   const n = Number(v);
   if (isNaN(n)) return '';
@@ -32,7 +28,6 @@ function cloudStatus(v) {
   return '매우 흐림';
 }
 
-// 캐시
 const imeiCidCache = new LRUCache({ max: 2000, ttl: 5 * 60 * 1000 });
 const cidAddrCache = new LRUCache({ max: 2000, ttl: 10 * 60 * 1000 });
 const geocache = new LRUCache({ max: 1000, ttl: 60 * 60 * 1000 });
@@ -106,7 +101,6 @@ async function geocodeByKakao(address) {
   return null;
 }
 
-// OpenMeteo — 태양광 daily(일사량/일조시간/구름량)
 async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
   const { startStr, endStr } = monthStartEnd(year, month);
 
@@ -124,7 +118,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
     longitude: lon,
     timezone: 'Asia/Seoul',
     daily: [
-      // weathercode 제거됨
       'cloudcover_mean',
       'sunshine_duration',
       'shortwave_radiation_sum'
@@ -192,7 +185,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
   return { ok: true, daily: results };
 }
 
-// 발전량(일별)
 async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
   const { start, end, startStr, endStr } = monthStartEnd(year, month);
 
@@ -281,7 +273,6 @@ const callSeries = async (hex) => {
   return [];
 }
 
-// csv 라우터
 router.get('/monthCsv', async (req, res) => {
  const multiHex = (req.query.multi || '').toLowerCase();
   try {
@@ -351,7 +342,6 @@ router.get('/monthCsv', async (req, res) => {
 
         csv += row.join(',') + '\n';
       }
-
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
