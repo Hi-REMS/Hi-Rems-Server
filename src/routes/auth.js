@@ -195,7 +195,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
     if (!me) return res.status(401).json({ message: 'unauthorized' });
 
     const ok = await argon2.verify(me.password, current_password);
-    if (!ok) return res.status(401).json({ message: '현재 비밀번호가 올바르지 않습니다.' });
+    if (!ok) return res.status(400).json({ message: '현재 비밀번호가 올바르지 않습니다.' });
 
     const policyErrors = validatePassword(new_password, me.username);
     if (policyErrors.length) {

@@ -947,8 +947,6 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
   }
 }
 
-// src/energy/service.js - handleHourly 함수
-
 async function handleHourly(req, res, next, defaultEnergyHex = '01') {
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
@@ -1022,11 +1020,10 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
       const p = pickMetrics(r.body);
       const wh = p?.wh ?? null;
       
-      // 0값 무시 (튀는 데이터 방지)
-      if (wh == null || Number(wh) === 0) continue;
+      // 0값 무시 로직 제거 (wh가 null인 경우만 건너뜀)
+      if (wh == null) continue;
 
-      // 🚨 [핵심 수정] Type 정보 가져오기 (지열은 Type 01, 02가 섞여 있음)
-      // Type을 구분하지 않으면 서로 다른 계측기의 누적값 차이가 계산됨
+      // Type 정보 가져오기
       const type = p.type || '00';
 
       let m = '00';
@@ -1038,8 +1035,7 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
 
       const hh = hourKey(new Date(r.time));
       
-      // 🚨 [핵심 수정] Key에 Type을 포함시켜서 따로 집계함
-      // 기존: `${hh}|${m}` -> 수정: `${hh}|${type}|${m}`
+      // Key에 Type을 포함시켜서 따로 집계함
       const key = `${hh}|${type}|${m}`;
       
       const rec = perHourMulti.get(key) || { firstWh: null, lastWh: null };
@@ -1053,12 +1049,10 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
       const hh = String(i).padStart(2, '0');
       let sumWh = 0n; let have = false;
 
-      // Type별로 계산된 델타값을 모두 합산 (Type 01 사용량 + Type 02 사용량)
       for (const [key, rec] of perHourMulti.entries()) {
         if (!key.startsWith(hh + '|')) continue;
         
-        if (!rec.firstWh || rec.firstWh === 0n) continue;
-        if (!rec.lastWh  || rec.lastWh === 0n) continue;
+        if (rec.firstWh == null || rec.lastWh == null) continue;
 
         if (rec.lastWh >= rec.firstWh) {
           sumWh += (rec.lastWh - rec.firstWh);
@@ -1066,7 +1060,8 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
         }
       }
       
-      // 파서가 이미 Wh 단위로 변환했으므로 1000으로 나누면 kWh
+      // 파서(parser.js)가 이미 모든 에너지원에 대해 Wh 단위로 변환해두었으므로,
+      // 단순히 1000으로 나누어 kWh를 구하면 됩니다.
       const kwh = have ? Number(sumWh) / 1000.0 : 0;
       
       return { hour: hh, kwh: Math.round(kwh * 100) / 100 };
@@ -1161,18 +1156,13 @@ async function handleKPIOnly(req, res, next) {
 
     const imei = await resolveOneImeiOrThrow(q);
 
-    // 에너지원 및 타입 파라미터
     const energyHex = (req.query.energy || "01").toLowerCase();
     const typeHex = (req.query.type || "").toLowerCase() || null;
     const multiHex = (req.query.multi || "").toLowerCase() || null;
     
-    // JS 필터링용 정수 변환
     const targetEnergyInt = parseInt(energyHex, 16);
     const targetTypeInt = typeHex ? parseInt(typeHex, 16) : null;
 
-    // 1. [최적화됨] 최신 데이터 조회 (인덱스 조건 추가)
-    // - 인덱스 조건(14, 길이, 00)을 모두 넣어 Partial Index를 강제로 타게 함
-    // - 에너지원(energyHex)도 SQL에서 미리 걸러내어 불필요한 데이터 로딩 방지
     const sqlLatest = `
       SELECT "time", body
       FROM public.log_rtureceivelog
@@ -1262,9 +1252,6 @@ async function handleKPIOnly(req, res, next) {
     const today_kwh = todayWhSum > 0 ? Math.round((todayWhSum / 1000) * 100) / 100 : 0;
 
 
-    // =========================================================================
-    // 4. 지난달 평균 출력 계산 (집계 뷰 사용)
-    // =========================================================================
     let last_month_avg_kw = null;
 
     const monthQuery = `
