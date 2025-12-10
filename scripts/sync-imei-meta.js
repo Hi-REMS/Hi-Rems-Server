@@ -123,16 +123,16 @@ const args = [
   try {
     console.log('▶ IMEI 메타 동기화 시작');
 
-    const sql = `
+const sql = `
       SELECT
-  rtu.rtuImei AS imei,
-  COALESCE(rems.address, '') AS address,
-  rems.worker AS worker
-FROM rtu_rtu AS rtu
-LEFT JOIN rems_rems AS rems
-  ON rems.rtu_id = rtu.id
-WHERE COALESCE(rems.address, '') <> '';
+        rtu.rtuImei AS imei,
+        COALESCE(rems.address, '') AS address,
+        rems.worker AS worker
+      FROM rtu_rtu AS rtu
+      LEFT JOIN rems_rems AS rems
+        ON rems.rtu_id = rtu.id
     `;
+
     const [rows] = await mysqlPool.query(sql);
     console.log(`  - MySQL에서 주소 보유 IMEI ${rows.length}건`);
 
@@ -153,7 +153,7 @@ WHERE COALESCE(rems.address, '') <> '';
         queue.push((async () => {
           const imei = String(src.imei || '').trim();
           const address = String(src.address || '').trim();
-          if (!imei || !address) return;
+          if (!imei) return;
 
           const meta = exists.get(imei);
           let { sido, sigungu } = parseKoreanAddress(address);

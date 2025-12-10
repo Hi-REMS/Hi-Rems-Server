@@ -314,9 +314,9 @@ function parseFrame(hex) {
     metrics: {},
   };
 
-  if (err !== 0x00) {
-    return { ...out, ok: false, reason: ERR_LABEL[err] || 'device_error' };
-  }
+if (err !== 0x00 && err !== 0x39) {
+  return { ...out, ok: false, reason: ERR_LABEL[err] || 'device_error' };
+}
 
   if (energy === 0x01 && type === 0x01) {
     if (b.length < 21) return { ...out, ok: false, reason: 'short_single' };

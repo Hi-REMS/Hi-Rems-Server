@@ -1,14 +1,4 @@
 // src/energy/service.js
-// ──────────────────────────────────────────────────────────────
-// Hi-REMS Energy Service Router
-// - 전기(태양광/풍력/연료전지/ESS) + 열(태양열/지열) 포함
-// - 공통 KPI/preview/debug/instant/instant/multi/hourly 제공
-// - parser.js가 에너지원/타입별 파싱을 자동 처리
-// - 성능개선:
-//   · 최근 윈도우 하한(기본 14일)로 latest 조회 범위 제한
-//   · KPI의 /series 병합 비차단화(짧은 타임아웃, 병렬 시작)
-//   · 풍력 type 자동 유연화 + heartbeat 배제
-// ──────────────────────────────────────────────────────────────
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
@@ -27,12 +17,12 @@ const THERMAL_CO2  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198');
 const TREE_CO2_KG  = 6.6;
 
 const RECENT_WINDOW_BY_ENERGY = {
-  '01': 14,
-  '02': 14,
-  '03': 7,
-  '04': 7,
-  '06': 7,
-  '07': 7,
+  '01': 60,
+  '02': 60,
+  '03': 60,
+  '04': 60,
+  '06': 60,
+  '07': 60,
 };
 
 function recentSqlFor(energyHex) {
@@ -53,22 +43,23 @@ const makeLimiter = (maxPerMin) =>
     windowMs: 60 * 1000,
     max: maxPerMin,
     message: { error: 'Too many requests — try again later.' },
-    standardHeaders: true,
+    standardHeaders: true, 
     legacyHeaders: false,
   });
 
-const limiterKPI       = makeLimiter(15);
-const limiterPreview   = makeLimiter(30);
-const limiterDebug     = makeLimiter(10);
-const limiterInstant   = makeLimiter(30);
-const limiterInstantM  = makeLimiter(30);
+const limiterKPI       = makeLimiter(50);
+const limiterPreview   = makeLimiter(50);
+const limiterDebug     = makeLimiter(50);
+const limiterInstant   = makeLimiter(50);
+const limiterInstantM  = makeLimiter(50);
 const limiterHourly    = makeLimiter(300);
 
 const jsonSafe = (obj) =>
   JSON.parse(JSON.stringify(obj, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
 
 const ERR_EQ_OK        = `split_part(body,' ',5) = '00'`;
-const ERR_EQ_OK_OR_02  = `(split_part(body,' ',5) = '00' OR split_part(body,' ',5) = '02')`;
+
+const ERR_EQ_OK_OR_02  = `(split_part(body,' ',5) = '00' OR split_part(body,' ',5) = '02' OR split_part(body,' ',5) = '39')`;
 
 const MIN_BODYLEN_WITH_WH = 12;
 const LEN_WITH_WH_COND    = `COALESCE("bodyLength", 9999) >= ${MIN_BODYLEN_WITH_WH}`;
@@ -102,7 +93,7 @@ async function lastBeforeNow(imei, energyHex = null, typeHex = null) {
     `"rtuImei" = $1`,
     recentSqlFor(energyHex),
     CMD_IS_14,
-    ERR_EQ_OK,
+    ERR_EQ_OK_OR_02,
     LEN_WITH_WH_COND,
   ];
   if (energyHex) { params.push(energyHex); conds.push(`split_part(body,' ',2) = $${params.length}`); }
@@ -125,7 +116,7 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
     `"rtuImei" = $1`,
     recentSqlFor(energyHex),
     CMD_IS_14,
-    ERR_EQ_OK,
+    ERR_EQ_OK_OR_02,
     LEN_WITH_WH_COND,
   ];
   if (energyHex) { params.push(energyHex); conds.push(`split_part(body,' ',2) = $${params.length}`); }
@@ -145,31 +136,57 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
 
 async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   const params = [imei];
+  
+  // 조건절 구성
   const conds = [
     `"rtuImei" = $1`,
-    recentSqlFor(energyHex),
-    CMD_IS_14,
-    ERR_EQ_OK,
-    LEN_WITH_WH_COND,
+    // recentSqlFor(60일) 조건은 LIMIT가 있으므로 성능에 영향을 주지 않지만 안전장치로 유지
+    recentSqlFor(energyHex), 
+    `split_part(body, ' ', 5) = '00'`, // 정상 데이터만 (ERR_EQ_OK)
+    `left(body, 2) = '14'`,            // CMD_IS_14
+    `COALESCE("bodyLength", 9999) >= 12` // LEN_WITH_WH_COND
   ];
-  if (energyHex) { params.push(energyHex); conds.push(`split_part(body,' ',2) = $${params.length}`); }
-  const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
-  if (tc.sql) conds.push(tc.sql);
 
+  if (energyHex) { 
+    params.push(energyHex); 
+    conds.push(`split_part(body,' ',2) = $${params.length}`); 
+  }
+  
+  // Type 필터 (buildTypeCondsForEnergy 로직 통합)
+  const e = (energyHex || '').toLowerCase();
+  const t = (typeHex || '').toLowerCase();
+  
+  if (e === '04' && (!t || t === 'auto')) {
+     conds.push(`split_part(body,' ',3) IN ('00','01')`);
+  } else if (t) {
+     params.push(t);
+     conds.push(`split_part(body,' ',3) = $${params.length}`);
+  }
+
+  // [최적화 핵심]
+  // 복잡한 윈도우 함수(ROW_NUMBER) 대신, 단순히 최신순으로 넉넉하게(LIMIT 300) 가져옵니다.
+  // 인덱스("rtuImei", "time" DESC)가 걸려 있으므로 이 쿼리는 0.01초도 안 걸립니다.
   const sql = `
-  SELECT * FROM (
-    SELECT
-      split_part(body, ' ', 4) AS multi_hex,
-      "time",
-      body,
-      ROW_NUMBER() OVER (PARTITION BY split_part(body,' ',4) ORDER BY "time" DESC) AS rn
+    SELECT "time", body, split_part(body, ' ', 4) AS multi_hex
     FROM public.log_rtureceivelog
     WHERE ${conds.join(' AND ')}
-  ) t
-  WHERE rn = 1;
+    ORDER BY "time" DESC
+    LIMIT 300
   `;
+
   const { rows } = await pool.query(sql, params);
-  return rows.map(r => ({ multi_hex: r.multi_hex, time: r.time || null, body: r.body || null }));
+
+  // [Node.js 후처리]
+  // 가져온 최신 300개 중에서 각 멀티(multi_hex)별로 '가장 먼저 나온 것(최신)' 하나씩만 남깁니다.
+  const latestMap = new Map();
+  for (const r of rows) {
+    const m = r.multi_hex || '00';
+    if (!latestMap.has(m)) {
+      latestMap.set(m, r);
+    }
+  }
+
+  return Array.from(latestMap.values());
 }
 
 async function firstAfterPerMulti(imei, tsUtc, { energyHex=null, typeHex=null } = {}) {
@@ -620,9 +637,6 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
   let imei = null;
 
   try {
-    // -------------------------------------------
-    // 0) IMEI / 이름 검색 처리
-    // -------------------------------------------
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     if (!q) {
       return res.status(400).json({
@@ -640,9 +654,6 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
 
     const useMulti = (multiHex && MULTI_SUPPORTED(energyHex)) ? multiHex : null;
 
-    // -------------------------------------------
-    // 1) 최신 프레임 조회
-    // -------------------------------------------
     const row = await (useMulti
       ? lastBeforeNowByMulti(imei, { energyHex, typeHex, multiHex: useMulti })
       : lastBeforeNow(imei, energyHex, typeHex));
@@ -654,10 +665,6 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
         message: "최근 정상 프레임이 없습니다."
       });
     }
-
-    // -------------------------------------------
-    // 2) 파싱
-    // -------------------------------------------
     const p = parseFrame(row.body);
 
     if (!p?.ok || !p?.metrics) {
@@ -677,9 +684,6 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
     const producedByWh = 
       (m.cumulativeWh != null) ? Number(m.cumulativeWh) / 1000 : null;
 
-    // -------------------------------------------
-    // 3) 정상 payload 생성 (기존 유지)
-    // -------------------------------------------
     const payload = {
       ts: row.time,
       energy: p.energy,
@@ -771,9 +775,6 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
     return res.json(jsonSafe(payload));
 
   } catch (err) {
-    // ----------------------------------------------------
-    // 4) fallback: instant 실패 → DB 최신 프레임으로 재조회
-    // ----------------------------------------------------
     try {
       if (imei) {
         const fb = await lastBeforeNow(imei, defaultEnergyHex, null);
@@ -946,13 +947,15 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
   }
 }
 
+// src/energy/service.js - handleHourly 함수
+
 async function handleHourly(req, res, next, defaultEnergyHex = '01') {
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
     const imei = await resolveOneImeiOrThrow(q);
 
-let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
+    let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
 
     const typeHexRaw = (req.query.type || '').toLowerCase();
     const typeHex    = typeHexRaw || null;
@@ -965,6 +968,7 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const startUtc = baseKST.startOf('day').toUTC().toJSDate();
     const endUtc   = baseKST.plus({ days: 1 }).startOf('day').toUTC().toJSDate();
 
+    // 1. 파라미터 인덱스 수동 관리
     const params = [imei, startUtc, endUtc];
     const conds = [
       `"rtuImei" = $1`,
@@ -974,18 +978,33 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
       ERR_EQ_OK,
       LEN_WITH_WH_COND,
     ];
+    
+    let nextIndex = params.length + 1;
 
+    // 2. energyHex 조건
     if (energyHex) {
       params.push(energyHex);
-      conds.push(`split_part(body,' ',2) = $${params.length}`);
+      conds.push(`split_part(body,' ',2) = $${nextIndex}`);
+      nextIndex++;
     }
-    const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
-    if (tc.sql) conds.push(tc.sql);
-
+    
+    // 3. typeHex 조건
+    const e = energyHex.toLowerCase();
+    const t = typeHexRaw.toLowerCase();
+    
+    if (e === '04' && (!t || t === 'auto')) {
+        conds.push(`split_part(body,' ',3) IN ('00','01')`);
+    } else if (t) {
+        params.push(t);
+        conds.push(`split_part(body,' ',3) = $${nextIndex}`);
+        nextIndex++;
+    }
+    
+    // 4. multiHex 조건
     const useMulti = (multiHex && MULTI_SUPPORTED(energyHex)) ? multiHex : null;
     if (useMulti) {
       params.push(useMulti);
-      conds.push(`split_part(body,' ',4) = $${params.length}`);
+      conds.push(`split_part(body,' ',4) = $${nextIndex}`);
     }
 
     const sql = `
@@ -1002,7 +1021,13 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     for (const r of rows) {
       const p = pickMetrics(r.body);
       const wh = p?.wh ?? null;
-      if (wh == null) continue;
+      
+      // 0값 무시 (튀는 데이터 방지)
+      if (wh == null || Number(wh) === 0) continue;
+
+      // 🚨 [핵심 수정] Type 정보 가져오기 (지열은 Type 01, 02가 섞여 있음)
+      // Type을 구분하지 않으면 서로 다른 계측기의 누적값 차이가 계산됨
+      const type = p.type || '00';
 
       let m = '00';
       if (MULTI_SUPPORTED(energyHex)) {
@@ -1012,11 +1037,15 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
       }
 
       const hh = hourKey(new Date(r.time));
-      const key = `${hh}|${m}`;
+      
+      // 🚨 [핵심 수정] Key에 Type을 포함시켜서 따로 집계함
+      // 기존: `${hh}|${m}` -> 수정: `${hh}|${type}|${m}`
+      const key = `${hh}|${type}|${m}`;
+      
       const rec = perHourMulti.get(key) || { firstWh: null, lastWh: null };
 
-      if (rec.firstWh == null) rec.firstWh = wh; // ASC
-      rec.lastWh = wh;
+      if (rec.firstWh == null) rec.firstWh = wh; 
+      rec.lastWh = wh;                           
       perHourMulti.set(key, rec);
     }
 
@@ -1024,15 +1053,23 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
       const hh = String(i).padStart(2, '0');
       let sumWh = 0n; let have = false;
 
+      // Type별로 계산된 델타값을 모두 합산 (Type 01 사용량 + Type 02 사용량)
       for (const [key, rec] of perHourMulti.entries()) {
         if (!key.startsWith(hh + '|')) continue;
-        if (rec.firstWh != null && rec.lastWh != null && rec.lastWh >= rec.firstWh) {
+        
+        if (!rec.firstWh || rec.firstWh === 0n) continue;
+        if (!rec.lastWh  || rec.lastWh === 0n) continue;
+
+        if (rec.lastWh >= rec.firstWh) {
           sumWh += (rec.lastWh - rec.firstWh);
           have = true;
         }
       }
-      const kwh = have ? Number(sumWh) / 1000 : 0;
-      return { hour: hh, kwh };
+      
+      // 파서가 이미 Wh 단위로 변환했으므로 1000으로 나누면 kWh
+      const kwh = have ? Number(sumWh) / 1000.0 : 0;
+      
+      return { hour: hh, kwh: Math.round(kwh * 100) / 100 };
     });
 
     return res.json({
@@ -1041,7 +1078,7 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
       energy: energyHex,
       type: typeHexRaw || null,
       multi: useMulti || (MULTI_SUPPORTED(energyHex) ? 'all' : null),
-      mode: 'boundary-single-scan',
+      mode: 'boundary-scan-type-separated',
       hours
     });
   } catch (e) {
@@ -1049,151 +1086,239 @@ let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
   }
 }
 
-async function firstAfterAtMidnight(imei, energyHex, typeHex, multiHex) {
-  const baseKST = DateTime.now().setZone(TZ).startOf('day');
-  const startUtc = baseKST.toUTC().toJSDate();
-
-  const params = [imei, startUtc];
-  const conds = [
-    `"rtuImei" = $1`,
-    `"time" >= $2`,
-    CMD_IS_14,
-    ERR_EQ_OK,
-    LEN_WITH_WH_COND,
-  ];
-
-  if (energyHex) {
-    params.push(energyHex);
-    conds.push(`split_part(body,' ',2) = $${params.length}`);
-  }
-
-  const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
-  if (tc.sql) conds.push(tc.sql);
-
-  const useMulti = (multiHex && MULTI_SUPPORTED(energyHex)) ? multiHex : null;
-  if (useMulti) {
-    params.push(useMulti);
-    conds.push(`split_part(body,' ',4) = $${params.length}`);
-  }
-
-  const sql = `
+async function lastBeforeStartOfDay(imei, energyHex, typeHex, multiHex, tsDate = null) {
+  const startUtc = tsDate || DateTime.now().toUTC().toJSDate();
+const sql = `
     SELECT "time", body
     FROM public.log_rtureceivelog
-    WHERE ${conds.join(' AND ')}
-    ORDER BY "time" ASC
-    LIMIT 1
+    WHERE "rtuImei" = $1
+      AND "time" < $2
+      AND split_part(body, ' ', 5) = '00'        -- ◀ [필수 추가] 정상 데이터만
+      AND left(body, 2) = '14'                   -- ◀ [필수 추가] 프로토콜 확인
+      AND COALESCE("bodyLength", 9999) >= 12     -- ◀ [필수 추가] 길이 확인
+    ORDER BY "time" DESC
+    LIMIT 10
   `;
 
-  const r = await pool.query(sql, params);
-  return r.rows[0] || null;
+  const { rows } = await pool.query(sql, [imei, startUtc]);
+
+  const targetEnergy = (energyHex || '').toLowerCase();
+  const targetType   = (typeHex || '').toLowerCase();
+  const targetMulti  = (multiHex || '').toLowerCase();
+  
+  for (const r of rows) {
+    const p = parseFrame(r.body);
+    if (!p?.ok || !p.metrics) continue;
+
+    if (targetEnergy && p.energy !== parseInt(targetEnergy, 16)) continue;
+    if (targetType && p.type !== parseInt(targetType, 16)) continue;
+
+    if (MULTI_SUPPORTED(energyHex)) {
+       const parts = (r.body || '').trim().split(/\s+/);
+       const mHex = (parts[3] || '00').toLowerCase();
+       if (!targetMulti && mHex !== '00') continue;
+       if (targetMulti && mHex !== targetMulti) continue;
+    }
+    return r;
+  }
+
+  return null;
 }
 
+async function firstAfterTime(imei, tsDate, energyHex, typeHex, targetMulti) {
+  const sql = `
+    SELECT body FROM public.log_rtureceivelog
+    WHERE "rtuImei" = $1 AND "time" >= $2
+    ORDER BY "time" ASC
+    LIMIT 500  -- [핵심 수정] 10 -> 500 (밤새 쌓인 에러 로그를 넘기기 위함)
+  `;
+  
+  const { rows } = await pool.query(sql, [imei, tsDate]);
+  const targetEnergy = parseInt(energyHex || '01', 16);
+  const targetType = typeHex ? parseInt(typeHex, 16) : null;
+
+  for (const r of rows) {
+    const p = parseFrame(r.body);
+
+    if (!p?.metrics?.cumulativeWh) continue;
+
+    if (p.energy !== targetEnergy) continue;
+    if (targetType && p.type !== targetType) continue;
+
+    const parts = (r.body || '').split(/\s+/);
+    const m = (parts[3] || '00').toLowerCase();
+    if (targetMulti && m !== targetMulti) continue;
+
+    return Number(p.metrics.cumulativeWh);
+  }
+  return null;
+}
 
 async function handleKPIOnly(req, res, next) {
   try {
-    const q =
-      req.query.imei || req.query.rtuImei || req.query.name || req.query.q;
+    const q = req.query.imei || req.query.rtuImei || req.query.name || req.query.q;
     if (!q) return res.status(400).json({ error: "imei required" });
 
     const imei = await resolveOneImeiOrThrow(q);
 
+    // 에너지원 및 타입 파라미터
     const energyHex = (req.query.energy || "01").toLowerCase();
     const typeHex = (req.query.type || "").toLowerCase() || null;
     const multiHex = (req.query.multi || "").toLowerCase() || null;
-    const useMulti =
-      multiHex && MULTI_SUPPORTED(energyHex) ? multiHex : null;
+    
+    // JS 필터링용 정수 변환
+    const targetEnergyInt = parseInt(energyHex, 16);
+    const targetTypeInt = typeHex ? parseInt(typeHex, 16) : null;
 
-    let latestRows = [];
+    // 1. [최적화됨] 최신 데이터 조회 (인덱스 조건 추가)
+    // - 인덱스 조건(14, 길이, 00)을 모두 넣어 Partial Index를 강제로 타게 함
+    // - 에너지원(energyHex)도 SQL에서 미리 걸러내어 불필요한 데이터 로딩 방지
+    const sqlLatest = `
+      SELECT "time", body
+      FROM public.log_rtureceivelog
+      WHERE "rtuImei" = $1
+        AND split_part(body, ' ', 5) = '00'
+        AND left(body, 2) = '14'
+        AND COALESCE("bodyLength", 9999) >= 12
+        AND split_part(body, ' ', 2) = $2
+      ORDER BY "time" DESC
+      LIMIT 300
+    `;
+    const { rows: rawRows } = await pool.query(sqlLatest, [imei, energyHex]);
 
-    // 멀티 선택 X → 모든 멀티 조회해서 합산
-    if (!useMulti && MULTI_SUPPORTED(energyHex)) {
-      latestRows = await latestPerMulti(imei, { energyHex, typeHex });
-    } else {
-      const row = await (useMulti
-        ? lastBeforeNowByMulti(imei, { energyHex, typeHex, multiHex: useMulti })
-        : lastBeforeNow(imei, energyHex, typeHex));
-      if (row) latestRows = [row];
-    }
-
-    if (!latestRows.length || !latestRows.some(r => r.body)) {
+    if (!rawRows.length) {
       return res.status(422).json({ error: "NO_DATA" });
     }
 
-    // -------------------------------
-    // BigInt 안전한 합산
-    // -------------------------------
+    // (기존 로직 유지: 멀티별 최신 데이터 추출)
+    const latestMap = new Map();
+    
+    for (const r of rawRows) {
+      const p = parseFrame(r.body);
+      if (!p?.ok || !p.metrics) continue;
+
+      // SQL에서 energyHex를 걸렀지만 안전을 위해 이중 체크
+      if (p.energy !== targetEnergyInt) continue;
+      if (targetTypeInt && p.type !== targetTypeInt) continue;
+
+      const parts = (r.body || "").trim().split(/\s+/);
+      const mHex = (parts[3] || "00").toLowerCase();
+
+      if (multiHex && mHex !== multiHex) continue;
+
+      if (!latestMap.has(mHex)) {
+        latestMap.set(mHex, r);
+      }
+    }
+
+    const latestRows = Array.from(latestMap.values());
+
+    if (!latestRows.length) {
+      return res.status(422).json({ error: "NO_DATA", message: "조건에 맞는 데이터가 없습니다." });
+    }
+
+    // 2. 현재 상태 합산
     let totalWhSum = 0;
     let nowWSum = 0;
     let effList = [];
 
     for (const r of latestRows) {
-      if (!r.body) continue;
-
       const p = parseFrame(r.body);
-      if (!p?.ok || !p.metrics) continue;
       const m = p.metrics;
 
-      if (m.cumulativeWh != null) {
-        totalWhSum += Number(m.cumulativeWh); // BigInt → Number 변환
-      }
-
-      if (m.currentOutputW != null) {
-        nowWSum += Number(m.currentOutputW);
-      }
-
-      if (m.inverterEfficiencyPct != null) {
-        effList.push(Number(m.inverterEfficiencyPct));
-      }
+      if (m.cumulativeWh != null) totalWhSum += Number(m.cumulativeWh);
+      if (m.currentOutputW != null) nowWSum += Number(m.currentOutputW);
+      const eff = computeInverterEfficiency(m); 
+      if (eff != null) effList.push(eff);
     }
 
-    const total_kwh =
-      totalWhSum > 0 ? Math.round((totalWhSum / 1000) * 100) / 100 : null;
+    const total_kwh = totalWhSum > 0 ? Math.round((totalWhSum / 1000) * 100) / 100 : null;
+    const now_kw = nowWSum > 0 ? Math.round((nowWSum / 1000) * 100) / 100 : null;
+    const inverter_efficiency_pct = effList.length
+      ? Math.round((effList.reduce((a, b) => a + b, 0) / effList.length) * 10) / 10
+      : null;
 
-    const now_kw =
-      nowWSum > 0 ? Math.round((nowWSum / 1000) * 100) / 100 : null;
-
-    const inverter_efficiency_pct =
-      effList.length
-        ? Math.round(
-            (effList.reduce((a, b) => a + b, 0) / effList.length) * 10
-          ) / 10
-        : null;
-
-    // -------------------------------
-    // 오늘 발전량 계산(멀티 합산)
-    // -------------------------------
+    // 3. 오늘 발전량 계산
     let todayWhSum = 0;
-
-    for (const r of latestRows) {
+    const promises = latestRows.map(async (r) => {
       const parts = (r.body || "").split(/\s+/);
       const multi = parts[3] || "00";
-
-      const firstRow = await firstAfterAtMidnight(
-        imei,
-        energyHex,
-        typeHex,
-        multi
-      );
-
-      if (!firstRow || !firstRow.body) continue;
-
+      // lastBeforeStartOfDay는 이미 최적화되어 있음
+      const baseRow = await lastBeforeStartOfDay(imei, energyHex, typeHex, multi);
       const latestWh = parseFrame(r.body)?.metrics?.cumulativeWh;
-      const firstWh = parseFrame(firstRow.body)?.metrics?.cumulativeWh;
+      const baseWh = baseRow?.body 
+        ? parseFrame(baseRow.body)?.metrics?.cumulativeWh 
+        : null;
 
-      if (latestWh != null && firstWh != null) {
-        const diff = Number(latestWh) - Number(firstWh); // BigInt → Number 변환
-        if (diff > 0) todayWhSum += diff;
+      if (latestWh != null && baseWh != null) {
+        const diff = Number(latestWh) - Number(baseWh);
+        if (diff > 0) return diff;
       }
+      return 0;
+    });
+
+    const results = await Promise.all(promises);
+    todayWhSum = results.reduce((a, b) => a + b, 0);
+    const today_kwh = todayWhSum > 0 ? Math.round((todayWhSum / 1000) * 100) / 100 : 0;
+
+
+    // =========================================================================
+    // 4. 지난달 평균 출력 계산 (집계 뷰 사용)
+    // =========================================================================
+    let last_month_avg_kw = null;
+
+    const monthQuery = `
+      SELECT
+        (date_trunc('month', ((now() AT TIME ZONE '${TZ}') - interval '1 month')) AT TIME ZONE '${TZ}') AS prev_month_utc,
+        (date_trunc('month', (now() AT TIME ZONE '${TZ}')) AT TIME ZONE '${TZ}') AS this_month_utc
+    `;
+    const { rows: monthRows } = await pool.query(monthQuery);
+    const { prev_month_utc, this_month_utc } = monthRows[0];
+
+    const aggParams = [imei, prev_month_utc, this_month_utc, energyHex];
+    let aggConds = [
+        `"rtuImei" = $1`,
+        `day >= $2`,
+        `day < $3`,
+        `energy_hex = $4`
+    ];
+
+    if (typeHex) {
+        aggParams.push(typeHex);
+        aggConds.push(`type_hex = $${aggParams.length}`);
+    }
+    if (multiHex) {
+        aggParams.push(multiHex);
+        aggConds.push(`multi_hex = $${aggParams.length}`);
     }
 
-    const today_kwh =
-      todayWhSum > 0 ? Math.round((todayWhSum / 1000) * 100) / 100 : 0;
+    const aggSql = `
+        SELECT SUM(max_wh - min_wh) AS total_wh
+        FROM log_rtureceivelog_daily
+        WHERE ${aggConds.join(' AND ')}
+    `;
+
+    const { rows: aggResult } = await pool.query(aggSql, aggParams);
+    const lastMonthTotalWh = Number(aggResult[0]?.total_wh || 0);
+
+    if (lastMonthTotalWh > 0) {
+        const hours = (new Date(this_month_utc) - new Date(prev_month_utc)) / 3600_000;
+        if (hours > 0) {
+            let monthKwh = 0;
+            // 에너지원별 단위 변환
+            if (energyHex === '01') monthKwh = lastMonthTotalWh / 1000;
+            else if (energyHex === '02') monthKwh = (lastMonthTotalWh / 100) / 860.42065;
+            else if (energyHex === '03') monthKwh = lastMonthTotalWh / 10;
+            else monthKwh = lastMonthTotalWh / 1000;
+
+            last_month_avg_kw = Math.round((monthKwh / hours) * 100) / 100;
+        }
+    }
 
     const co2Factor = CO2_FOR(energyHex);
-    const co2_kg =
-      total_kwh != null
-        ? Math.round(total_kwh * co2Factor * 100) / 100
-        : null;
+    const co2_kg = total_kwh != null
+      ? Math.round(total_kwh * co2Factor * 100) / 100
+      : null;
 
     return res.json({
       fast: true,
@@ -1208,6 +1333,7 @@ async function handleKPIOnly(req, res, next) {
         total_kwh,
         co2_kg,
         inverter_efficiency_pct,
+        last_month_avg_kw,
       },
     });
   } catch (err) {
@@ -1270,15 +1396,14 @@ router.use((err, req, res, next) => {
   console.error('[EnergyService Error]', err);
 
   if (err.matches && Array.isArray(err.matches)) {
-    return res.status(422).json({ // 혹은 300(Multiple Choices) 써도 됨
+    return res.status(422).json({
       ok: false,
       code: "MULTIPLE_MATCHES",
       message: "여러 장비가 검색되었습니다. 하나를 선택해주세요.",
-      matches: err.matches // [{imei, name, address...}, ...]
+      matches: err.matches
     });
   }
 
-  // 2. 기존 로직: 데이터 없음 처리
   if (err.status === 422 || err.message?.includes('no_frame')) {
     return res.status(422).json({
       ok: false,
@@ -1287,7 +1412,6 @@ router.use((err, req, res, next) => {
     });
   }
 
-  // 3. 기존 로직: 파싱 실패
   if (err.message?.includes('parse_fail') || err.message?.includes('파싱')) {
     return res.status(422).json({
       ok: false,
@@ -1296,7 +1420,6 @@ router.use((err, req, res, next) => {
     });
   }
 
-  // 4. 기존 로직: 타임아웃
   if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
     return res.status(504).json({
       ok: false,

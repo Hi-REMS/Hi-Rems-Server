@@ -188,13 +188,15 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
 async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
   const { start, end, startStr, endStr } = monthStartEnd(year, month);
 
+  // 1. DB 조회 (energy_daily) - SUM 추가하여 DB단에서 1차 합산
   try {
     const { rows } = await pool.query(
-      `SELECT ymd AS date, kwh AS energy_kwh
+      `SELECT ymd AS date, SUM(kwh) AS energy_kwh
          FROM public.energy_daily
         WHERE imei = $1
           AND ymd >= $2
           AND ymd <= $3
+        GROUP BY ymd
         ORDER BY ymd`,
       [`${imei}`, `${year}${pad2(month)}01`, `${year}${pad2(month)}31`]
     );
@@ -206,6 +208,7 @@ async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
     }
   } catch {}
 
+  // 2. DB 조회 (energy_hourly)
   try {
     const { rows } = await pool.query(
       `SELECT to_char((ts AT TIME ZONE 'Asia/Seoul')::date, 'YYYYMMDD') AS date,
@@ -227,39 +230,42 @@ async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
     }
   } catch {}
 
-  const seriesBase =
-    process.env.ENERGY_SERIES_URL || 'http://localhost:3000/api/energy/series';
+  // 3. API Fallback (series.js 호출)
+  const seriesBase = process.env.ENERGY_SERIES_URL || 'http://localhost:3000/api/energy/series';
 
   let energyHex = null;
+  // guessEnergyHex 함수가 외부 모듈에 있다면 import가 필요하지만, 
+  // 제공된 코드 컨텍스트 상 tryOrder로 커버되므로 try-catch 유지
   try {
     energyHex = await guessEnergyHex(imei);
   } catch {}
 
-const callSeries = async (hex) => {
-  const params = {
-    imei,
-    range: 'daily',
-    start: startStr,
-    end: endStr,
-    energy: hex,
+  const callSeries = async (hex) => {
+    const params = {
+      imei,
+      // [수정 포인트 1] range: 'daily' -> 'monthly'로 변경
+      // daily는 보통 시간별 데이터를 의미하고, monthly는 일별 합계 리스트를 의미합니다.
+      range: 'monthly',
+      start: startStr,
+      end: endStr,
+      energy: hex,
+    };
+
+    if (multiHex) params.multi = multiHex;
+
+    const r = await axios.get(seriesBase, {
+      params,
+      timeout: 12000,
+      validateStatus: () => true,
+    });
+
+    if (r.status !== 200 || !Array.isArray(r.data?.series)) return null;
+
+    return r.data.series.map((s) => ({
+      date: String(s.bucket).replace(/-/g, ''),
+      energy_kwh: Number(s.kwh) || 0,
+    }));
   };
-
-  if (multiHex) params.multi = multiHex;
-
-  const r = await axios.get(seriesBase, {
-    params,
-    timeout: 12000,
-    validateStatus: () => true,
-  });
-
-  if (r.status !== 200 || !Array.isArray(r.data?.series)) return null;
-
-  return r.data.series.map((s) => ({
-    date: String(s.bucket).replace(/-/g, ''),
-    energy_kwh: Number(s.kwh) || 0,
-  }));
-};
-
 
   const tryOrder = energyHex ? [energyHex, '02', '03', '01'] : ['02', '03', '01'];
 
@@ -274,7 +280,7 @@ const callSeries = async (hex) => {
 }
 
 router.get('/monthCsv', async (req, res) => {
- const multiHex = (req.query.multi || '').toLowerCase();
+  const multiHex = (req.query.multi || '').toLowerCase();
   try {
     const imei = String(req.query.imei || '').trim();
     const year = Number(req.query.year);
@@ -314,34 +320,50 @@ router.get('/monthCsv', async (req, res) => {
     const radArr = daily.shortwave_radiation_sum || [];
 
     const energyRows = await fetchDailyEnergyKwh(imei, year, month, multiHex);
-    const energyMap = new Map(energyRows.map(r => [String(r.date), r.energy_kwh]));
+
+    // [수정 포인트 2] Map 생성 시 덮어쓰기 방지 (합산 로직 적용)
+    // 기존: const energyMap = new Map(energyRows.map(r => [String(r.date), r.energy_kwh]));
+    
+    const energyMap = new Map();
+    for (const r of energyRows) {
+        const key = String(r.date);
+        const val = Number(r.energy_kwh) || 0;
+        
+        // 키가 이미 존재하면 값을 더해줌 (멀티가 여러 개일 때 합산)
+        const prev = energyMap.get(key) || 0;
+        energyMap.set(key, prev + val);
+    }
 
     let csv =
       '날짜,발전량(kWh),일사량(kWh/m²),일조시간(h),구름량(%),구름상태\n';
 
-      const today = new Date();
-      const todayYmd = Number(today.toISOString().slice(0, 10).replace(/-/g, ''));
+    const today = new Date();
+    const todayYmd = Number(today.toISOString().slice(0, 10).replace(/-/g, ''));
+
+    for (let i = 0; i < tArr.length; i++) {
+      const ymdNum = Number(String(tArr[i]).replace(/-/g, ''));
+
+      if (ymdNum > todayYmd) continue;
+
+      const ymd = String(ymdNum);
       
-      for (let i = 0; i < tArr.length; i++) {
-        const ymdNum = Number(String(tArr[i]).replace(/-/g, ''));
+      // 합산된 값 가져오기 (소수점 처리)
+      const rawKwh = energyMap.get(ymd);
+      const kwh = (rawKwh !== undefined) ? (Math.round(rawKwh * 100) / 100) : '';
+      
+      const cloud = ccArr[i] ?? '';
 
-        if (ymdNum > todayYmd) continue;
+      const row = [
+        ymd,
+        kwh,
+        radArr[i] ?? '',
+        sunArr[i] ? (sunArr[i] / 3600).toFixed(2) : '',
+        cloud,
+        cloudStatus(cloud)
+      ];
 
-        const ymd = String(ymdNum);
-        const kwh = energyMap.get(ymd) ?? '';
-        const cloud = ccArr[i] ?? '';
-
-        const row = [
-          ymd,
-          kwh,
-          radArr[i] ?? '',
-          sunArr[i] ? (sunArr[i] / 3600).toFixed(2) : '',
-          cloud,
-          cloudStatus(cloud)
-        ];
-
-        csv += row.join(',') + '\n';
-      }
+      csv += row.join(',') + '\n';
+    }
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(

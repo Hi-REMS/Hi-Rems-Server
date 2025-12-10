@@ -23,14 +23,18 @@ const RECENT_WINDOW_BY_ENERGY = {
   '07': 14,
 };
 
+// [추가] 집계 뷰를 사용해야 하는 장기 조회 범위 목록
+const AGGREGATE_RANGES = ['yearly', 'last4weeks', 'monthly', 'weekly'];
+
 function okClause(req) {
   const ok = String(req.query.ok || '1').toLowerCase();
-  return (ok === 'any' || ok === '0') ? '' : "AND split_part(body,' ',5)='00'";
+  if (ok === 'any' || ok === '0') return '';
+  return "AND split_part(body,' ',5)='00'";
 }
 
 const seriesLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: 300,
   message: { error: 'Too many requests — try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -88,149 +92,222 @@ function buildTypeCondsForEnergy(energyHex, typeHex, params) {
   return { sql:null, added:false };
 }
 
+// src/energy/service.js
+
 router.get('/series', seriesLimiter, async (req, res, next) => {
+  const tAllStart = Date.now();
+
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
-    if (!q) return res.status(400).json({error:'imei 필요'});
+    if (!q) return res.status(400).json({ error: 'imei 필요' });
 
     const imei = await resolveOneImeiOrThrow(q);
 
-    const range = (req.query.range || 'weekly').toLowerCase();
+    const range     = (req.query.range || 'weekly').toLowerCase();
     const energyHex = (req.query.energy || '01').toLowerCase();
     const typeHex   = (req.query.type || '').toLowerCase() || null;
-    const wantHourly = String(req.query.detail || '').toLowerCase()==='hourly';
+    const wantHourly = String(req.query.detail || '').toLowerCase() === 'hourly';
     const multiParam = (req.query.multi || '').toLowerCase();
-    const wantMulti = ['00','01','02','03'].includes(multiParam) ? multiParam : null;
+    const wantMulti  = ['00', '01', '02', '03'].includes(multiParam) ? multiParam : null;
 
     const startQ = parseYmd(req.query.start);
-    const endQ = parseYmd(req.query.end);
+    const endQ   = parseYmd(req.query.end);
     let startUtc, endUtc, bucket;
 
-    if (startQ && endQ) {
+if (startQ && endQ) {
       startUtc = kstStartUtc(startQ);
       endUtc   = kstEndExclusiveUtc(endQ);
       bucket   = 'day';
     } else if (range === 'yearly') {
-      // KST 기준 지금 시각
+      // ... (yearly 로직 유지) ...
       const nowKST = new Date(
         new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' })
       );
-
-      // 조회 연도: 예) 2024, 2025 (없으면 현재 연도)
       const year = Number(req.query.year) || nowKST.getFullYear();
-
-      // 조회 연도 1월 1일 00:00 KST → UTC로 변환(-9h)
       startUtc = new Date(Date.UTC(year, 0, 1, -9));
-
-      // [수정] 과거 연도(2023 등) 조회 시 종료 시점은 그 해 12월 31일로 고정
       if (year < nowKST.getFullYear()) {
-        // 해당 연도 12월 31일 23:59:59 KST
         endUtc = new Date(Date.UTC(year, 11, 31, 23, 59, 59, -9));
       } else {
-        // 올해라면 현재 시각까지
         endUtc = nowKST;
       }
-
-      bucket = 'day';  // 일 단위 집계
+      bucket = 'day';
+      
+    // 🚨 [수정 포인트] monthly를 last4weeks와 동일하게 처리하거나 last4weeks 로직 활용
+    } else if (range === 'last4weeks' || range === 'monthly') { 
+      const nowKST = new Date(
+        new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' })
+      );
+      // 오늘 날짜의 00:00:00 (KST 기준)
+      const todayKST = new Date(nowKST.getFullYear(), nowKST.getMonth(), nowKST.getDate());
+      
+      // endUtc: 오늘 00:00:00 (오늘 데이터 제외, 어제까지 꽉 채운 데이터)
+      // 만약 오늘 데이터도 포함하려면 nowKST를 그대로 쓰세요.
+      // 보통 통계는 어제까지의 데이터를 보여주는 경우가 많습니다.
+      const end = todayKST; 
+      
+      // startUtc: 28일 전 (4주 전)
+      const start = new Date(todayKST.getTime() - 28 * 24 * 3600 * 1000);
+      
+      // UTC 변환 (이미 Date 객체이므로 쿼리 파라미터로 넘길 때 자동 변환되거나 DB가 알아서 처리)
+      // 정확한 UTC 값을 원한다면 -9시간 보정 필요할 수 있음 (기존 getRangeUtc 로직 참고)
+      
+      // 기존 로직을 최대한 활용하여 UTC로 변환 (timeutil.js 의존성 고려)
+      // 여기서는 심플하게 Date 객체로 설정
+      startUtc = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), -9));
+      endUtc   = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), -9));
+      
+      bucket   = 'day';
+      
     } else {
       const r = getRangeUtc(range);
       startUtc = r.startUtc;
-      endUtc = r.endUtc;
-      bucket = r.bucket;
+      endUtc   = r.endUtc;
+      bucket   = r.bucket;
     }
 
-    // [수정] yearly 모드일 때는 365일 제한 로직을 건너뜀 (null 처리)
     const limitDays = (range === 'yearly') ? null : RECENT_WINDOW_BY_ENERGY[energyHex];
-    
     if (limitDays) {
-      const maxWindowMs = limitDays * 86400 * 1000;
-      const requestedDiff = endUtc.getTime() - startUtc.getTime();
+      const maxWindowMs    = limitDays * 86400 * 1000;
+      const requestedDiff  = endUtc.getTime() - startUtc.getTime();
       if (requestedDiff > maxWindowMs) {
         startUtc = new Date(endUtc.getTime() - maxWindowMs);
         if (bucket === 'month') bucket = 'day';
       }
     }
 
-    const conds = [
-      `"rtuImei" = $1`,
-      `"time" >= $2`,
-      `"time" < $3`,
-      "left(body,2)='14'",
-      LEN_WITH_WH_COND
-    ];
-
-    const okFilter = okClause(req);
-    if (okFilter) conds.push(okFilter.replace(/^AND\s+/,''));
-
+    // =========================================================================
+    // [핵심 변경] 쿼리 분기: 장기 조회(AGGREGATE) vs 단기 조회(RAW)
+    // =========================================================================
+    let sql, tableUsed;
+    const isAggregateQuery = AGGREGATE_RANGES.includes(range) && !wantHourly;
     const params = [imei, startUtc, endUtc];
 
-    // [수정] 인덱스(split_part)를 활용하기 위해 주석 해제!
-    if (energyHex) conds.push(`body LIKE '14 ${energyHex} %'`);
+    if (isAggregateQuery) {
+        // [CASE A] 장기 조회: 집계 뷰 사용 (성능 최적화)
+        params.push(energyHex);
+        
+        let aggConds = [
+            `"rtuImei" = $1`,
+            `day >= $2`,
+            `day < $3`,
+            `energy_hex = $4`
+        ];
 
-    const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
-    if (tc.sql) conds.push(tc.sql);
+        if (typeHex) {
+            params.push(typeHex);
+            aggConds.push(`type_hex = $${params.length}`);
+        }
 
-    if (wantMulti && MULTI_SUPPORTED(energyHex)) {
-      conds.push(`body LIKE '14 ${energyHex} __ ${wantMulti} %'`);
+        if (wantMulti && MULTI_SUPPORTED(energyHex)) {
+            params.push(wantMulti);
+            aggConds.push(`multi_hex = $${params.length}`);
+        }
+
+        sql = `
+            SELECT day AS time, (max_wh - min_wh) AS daily_wh_diff, multi_hex
+            FROM public.log_rtureceivelog_daily
+            WHERE ${aggConds.join(' AND ')}
+            ORDER BY day ASC
+        `;
+        tableUsed = 'AGGREGATE';
+
+    } else {
+        // [CASE B] 단기 조회: 원본 테이블 사용 (기존 로직)
+        const conds = [
+          `"rtuImei" = $1`,
+          `"time" >= $2`,
+          `"time" < $3`,
+          `left(body,2)='14'`,
+          LEN_WITH_WH_COND
+        ];
+
+        const okFilter = okClause(req);
+        if (okFilter) conds.push(okFilter.replace(/^AND\s+/, ''));
+
+        if (energyHex) {
+          params.push(energyHex);
+          conds.push(`split_part(body, ' ', 2) = $${params.length}`);
+        }
+
+        const tc = buildTypeCondsForEnergy(energyHex, typeHex, params);
+        if (tc.sql) conds.push(tc.sql);
+
+        if (wantMulti && MULTI_SUPPORTED(energyHex)) {
+          params.push(wantMulti);
+          conds.push(`split_part(body, ' ', 4) = $${params.length}`);
+        }
+        
+        sql = `
+            SELECT "time", "bodyLength", body
+            FROM public.log_rtureceivelog
+            WHERE ${conds.join(' AND ')}
+            ORDER BY "time" ASC
+        `;
+        tableUsed = 'RAW';
     }
 
-    const sql = `
-      SELECT "time", "bodyLength", body
-      FROM public.log_rtureceivelog
-      WHERE ${conds.join(' AND ')}
-      ORDER BY "time" ASC
-    `;
-
+    // DB 쿼리 실행
+    const dbStartTime = Date.now();
     const { rows } = await pool.query(sql, params);
-    const perKey = new Map();
+    const dbEndTime   = Date.now();
+    const dbMs        = dbEndTime - dbStartTime;
 
-    // [샘플링 설정] 태양광(01)은 0(모두 처리), 그 외는 10분 단위
-    let SAMPLE_INTERVAL_MS = (energyHex === '01') ? 0 : 10 * 60 * 1000;
-    let lastProcessedTime = 0;
+    // 데이터 후처리
+    let perKey = new Map();
+    
+    if (tableUsed === 'AGGREGATE') {
+        // [CASE A 후처리] 집계 데이터 처리
+        for (const r of rows) {
+            const wh = Number(r.daily_wh_diff || 0);
+            if (wh <= 0) continue;
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const currentTime = new Date(r.time).getTime();
+            const m = r.multi_hex || '00';
+            const bkey = kstDayKey(new Date(r.time));
+            const key  = `${bkey}|${m}`;
 
-      const isFirst = (i === 0);
-      const isLast  = (i === rows.length - 1);
-
-      // 1. [수정] 에너지원 검증을 가장 먼저 수행
-      const head = headerFromHex(r.body);
-      if (energyHex && head.energyHex !== energyHex) {
-         continue; 
-      }
-
-      // 2. [수정] 그 다음 샘플링 체크
-      if (!isFirst && !isLast && SAMPLE_INTERVAL_MS > 0) {
-        if (currentTime - lastProcessedTime < SAMPLE_INTERVAL_MS) {
-          continue; 
+            const rec = perKey.get(key) || { dailyWh: 0, firstTs: r.time, lastTs: r.time };
+            rec.dailyWh += wh; // 이미 일별 차이값이므로 누적
+            rec.lastTs = r.time;
+            perKey.set(key, rec);
         }
-      }
 
-      // 3. 파싱
-      const p = parseFrame(r.body); 
-      const wh = p?.metrics?.cumulativeWh ?? null;
-      if (wh == null) continue;
+    } else {
+        // [CASE B 후처리] 원본 데이터 처리
+        let SAMPLE_INTERVAL_MS = (energyHex === '01') ? 60 * 1000 : 10 * 60 * 1000;
+        let lastProcessedTime = 0;
 
-      // 4. [수정] 모든 관문을 통과했을 때만 시간 갱신
-      lastProcessedTime = currentTime;
+        for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            const currentTime = new Date(r.time).getTime();
+            const isFirst = (i === 0);
+            const isLast  = (i === rows.length - 1);
 
-      const m = MULTI_SUPPORTED(head.energyHex)
-        ? (wantMulti || (head.multi || '00'))
-        : '00';
+            const head = headerFromHex(r.body);
+            if (energyHex && head.energyHex !== energyHex) continue;
 
-      const bkey = bucketKeyKST(new Date(r.time), bucket);
-      const key = `${bkey}|${m}`;
+            if (!isFirst && !isLast && SAMPLE_INTERVAL_MS > 0) {
+                if (currentTime - lastProcessedTime < SAMPLE_INTERVAL_MS) continue;
+            }
 
-      const rec = perKey.get(key) || { firstWh:null, lastWh:null, firstTs:null, lastTs:null };
-      if (rec.firstWh == null) {
-        rec.firstWh = wh;
-        rec.firstTs = r.time;
-      }
-      rec.lastWh = wh;
-      rec.lastTs = r.time;
-      perKey.set(key, rec);
+            const p = parseFrame(r.body);
+            const wh = p?.metrics?.cumulativeWh ?? null;
+            if (wh == null) continue;
+
+            lastProcessedTime = currentTime;
+            const m = MULTI_SUPPORTED(head.energyHex) ? (wantMulti || (head.multi || '00')) : '00';
+            
+            const bkey = bucketKeyKST(new Date(r.time), bucket);
+            const key  = `${bkey}|${m}`;
+
+            const rec = perKey.get(key) || { firstWh: null, lastWh: null, firstTs: null, lastTs: null };
+            if (rec.firstWh == null) {
+                rec.firstWh = wh;
+                rec.firstTs = r.time;
+            }
+            rec.lastWh = wh;
+            rec.lastTs = r.time;
+            perKey.set(key, rec);
+        }
     }
 
     const co2Factor = CO2_FOR(energyHex);
@@ -238,55 +315,82 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
 
     for (const [key, rec] of perKey.entries()) {
       const [bkey] = key.split('|');
-      const kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
-      const cur = bucketAgg.get(bkey) || { kwh:0, firstAt:rec.firstTs, lastAt:rec.lastTs };
+      
+      let kwh;
+      if (tableUsed === 'AGGREGATE') {
+          // =====================================================================
+          // ⭐ [수정됨] 집계 뷰 사용 시, 에너지원별 단위 변환 적용 (지열/태양열 보정)
+          // =====================================================================
+          const rawVal = Math.max(0, rec.dailyWh);
+
+          if (energyHex === '03') {
+              // 🌍 [지열] 원본이 (10 * kWh)이므로 10으로 나눔
+              kwh = rawVal / 10;
+          } 
+          else if (energyHex === '02') {
+              // 🔥 [태양열] 원본이 (100 * kcal) -> 100으로 나눠 kcal -> 860.42로 나눠 kWh
+              const kcal = rawVal / 100;
+              kwh = kcal / 860.42065;
+          } 
+          else {
+              // ☀️ [태양광] 원본이 Wh이므로 1000으로 나눔
+              kwh = rawVal / 1000;
+          }
+
+      } else {
+          // [CASE B] 원본 테이블 사용 (단기 조회) - 기존 로직 유지
+          // (주의: 원본 데이터도 지열/태양열 단위가 다를 수 있으므로 추후 확인 권장)
+          kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
+      }
+
+      const cur = bucketAgg.get(bkey) || { kwh: 0, firstAt: rec.firstTs, lastAt: rec.lastTs };
       cur.kwh += kwh;
       cur.firstAt = cur.firstAt ?? rec.firstTs;
-      cur.lastAt = rec.lastTs;
+      cur.lastAt  = rec.lastTs;
       bucketAgg.set(bkey, cur);
     }
 
     let series = [...bucketAgg.entries()].map(([bucket, agg]) => {
-      const kwh = round2(agg.kwh);
+      const kwh     = round2(agg.kwh);
       const co2_kg = round2(kwh * co2Factor);
-      const trees = Math.round(co2_kg / TREE_KG);
-      return { bucket, kwh, co2_kg, trees, firstAt: agg.firstAt, lastAt: agg.lastAt };
+      const trees  = Math.round(co2_kg / TREE_KG);
+      return { bucket, kwh, co2_kg, trees, firstAt: agg.firstAt, lastAt : agg.lastAt };
     });
 
-    series.sort((a,b)=>a.bucket.localeCompare(b.bucket));
+    series.sort((a, b) => a.bucket.localeCompare(b.bucket));
 
     if (range === 'yearly') {
-       const monthAgg = new Map();
+      const monthAgg = new Map();
       for (const row of series) {
-        const mk = row.bucket.slice(0,7);
-        const t = monthAgg.get(mk) || {
-          bucket: mk, kwh:0, co2_kg:0, trees:0,
+        const mk = row.bucket.slice(0, 7);
+        const t  = monthAgg.get(mk) || {
+          bucket: mk, kwh: 0, co2_kg: 0, trees: 0,
           firstAt: row.firstAt, lastAt: row.lastAt
         };
-        t.kwh += row.kwh;
+        t.kwh     += row.kwh;
         t.co2_kg += row.co2_kg;
-        t.trees += row.trees;
-        if (row.firstAt < t.firstAt) t.firstAt = row.firstAt;
-        if (row.lastAt > t.lastAt) t.lastAt = row.lastAt;
+        t.trees  += row.trees;
+        if (row.firstAt && (!t.firstAt || row.firstAt < t.firstAt)) t.firstAt = row.firstAt;
+        if (row.lastAt  && (!t.lastAt || row.lastAt  > t.lastAt)) t.lastAt  = row.lastAt;
         monthAgg.set(mk, t);
       }
-      series = [...monthAgg.values()].sort((a,b)=>a.bucket.localeCompare(b.bucket));
+      series = [...monthAgg.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
       bucket = 'month';
     }
 
-    const total_kwh = round2(series.reduce((s,x)=>s + (x.kwh||0),0));
+    const total_kwh     = round2(series.reduce((s, x) => s + (x.kwh || 0), 0));
     const total_co2_kg = round2(total_kwh * co2Factor);
-    const total_trees = Math.round(total_co2_kg / TREE_KG);
+    const total_trees  = Math.round(total_co2_kg / TREE_KG);
 
     let detail_hourly = null;
 
-    if (wantHourly && rows.length && range !== 'yearly') {
-      const lastRowTime = rows[rows.length-1].time;
-      const lastDay = kstDayKey(new Date(lastRowTime));
-      const perHourMap = new Map();
+    if (wantHourly && rows.length && range !== 'yearly' && tableUsed === 'RAW') {
+      const lastRowTime = rows[rows.length - 1].time;
+      const lastDay     = kstDayKey(new Date(lastRowTime));
+      const perHourMap  = new Map();
 
       let lastHourlyProcessedTime = 0;
-      let HOURLY_SAMPLE_MS = (energyHex === '01') ? 0 : 60 * 1000;
+      let HOURLY_SAMPLE_MS = (energyHex === '01') ? 60 * 1000 : 60 * 1000;
 
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
@@ -294,66 +398,82 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
         if (kstDayKey(t) !== lastDay) continue;
 
         const currentTime = t.getTime();
-        const isLast = (i === rows.length - 1);
-        
-        // [수정] 상세 데이터도 에너지 검증을 먼저 수행
+        const isLast      = (i === rows.length - 1);
+
         const head = headerFromHex(r.body);
         if (energyHex && head.energyHex !== energyHex) continue;
 
-        // [수정] 그 다음 샘플링
-        if (!isLast && HOURLY_SAMPLE_MS > 0 && (currentTime - lastHourlyProcessedTime < HOURLY_SAMPLE_MS)) {
-             continue;
+        if (!isLast && HOURLY_SAMPLE_MS > 0 &&
+            (currentTime - lastHourlyProcessedTime < HOURLY_SAMPLE_MS)) {
+          continue;
         }
 
-        const p = parseFrame(r.body);
+        const p  = parseFrame(r.body);
         const wh = p?.metrics?.cumulativeWh ?? null;
         if (wh == null) continue;
-        
-        // [수정] 통과 후 시간 갱신
-        lastHourlyProcessedTime = currentTime;
 
-        const m = MULTI_SUPPORTED(head.energyHex) ? (head.multi || '00') : '00';
+        lastHourlyProcessedTime = currentTime;
+        const m = MULTI_SUPPORTED(head.energyHex) ? (wantMulti || (head.multi || '00')) : '00';
         if (wantMulti && MULTI_SUPPORTED(head.energyHex) && m !== wantMulti) continue;
 
-        const hh = kstHourKey(t).slice(11,13);
+        const hh  = kstHourKey(t).slice(11, 13);
         const key = `${hh}|${m}`;
-        const rec = perHourMap.get(key) || { firstWh:null, lastWh:null };
+        const rec = perHourMap.get(key) || { firstWh: null, lastWh: null };
         if (rec.firstWh == null) rec.firstWh = wh;
         rec.lastWh = wh;
         perHourMap.set(key, rec);
       }
-      
+
       const hourAgg = new Map();
       for (const [key, rec] of perHourMap.entries()) {
-        const hh = key.split('|')[0];
+        const hh  = key.split('|')[0];
         const kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
-        hourAgg.set(hh, (hourAgg.get(hh)||0) + kwh);
+        hourAgg.set(hh, (hourAgg.get(hh) || 0) + kwh);
       }
-      const rowsHourly = Array.from({length:24},(_,i)=>String(i).padStart(2,'0')).map(hh=>{
-        const kwh = round2(hourAgg.get(hh)||0);
-        return { hour: `${hh}:00`, kwh, eff_pct:null, weather:null, co2_kg: round2(kwh * co2Factor) };
+
+      const rowsHourly = Array.from({ length: 24 }, (_, i) => {
+        const hh  = String(i).padStart(2, '0');
+        const kwh = round2(hourAgg.get(hh) || 0);
+        return {
+          hour    : `${hh}:00`,
+          kwh,
+          eff_pct: null,
+          weather: null,
+          co2_kg : round2(kwh * co2Factor)
+        };
       });
-      detail_hourly = { day:lastDay, rows: rowsHourly };
+
+      detail_hourly = { day: lastDay, rows: rowsHourly };
     }
 
+    const totalEndTime        = Date.now();
+    const nodeProcessingMs    = totalEndTime - dbEndTime;
+    const totalMs             = totalEndTime - tAllStart;
+
+    console.log(
+      `[series] imei=${imei} range=${range} energy=${energyHex} rows=${rows.length} ` +
+      `dbMs=${dbMs} nodeMs=${nodeProcessingMs} totalMs=${totalMs} table=${tableUsed}`
+    );
+
     res.json({
-      deviceInfo:{rtuImei:imei, tz:TZ},
-      params:{
+      deviceInfo: { rtuImei: imei, tz: TZ },
+      params: {
         range,
         energy_hex: energyHex,
-        type_hex: typeHex,
-        multi: (wantMulti && MULTI_SUPPORTED(energyHex)) ? wantMulti : 'all',
-        detail: wantHourly ? 'hourly' : undefined,
-        ok: req.query.ok || '00'
+        type_hex  : typeHex,
+        multi     : (wantMulti && MULTI_SUPPORTED(energyHex)) ? wantMulti : 'all',
+        detail    : wantHourly ? 'hourly' : undefined,
+        ok        : req.query.ok || '00'
       },
       bucket,
-      range_utc:{start:startUtc, end:endUtc},
+      range_utc: { start: startUtc, end: endUtc },
       series,
       detail_hourly,
-      summary:{total_kwh, total_co2_kg, total_trees}
+      summary: { total_kwh, total_co2_kg, total_trees }
     });
 
-  } catch (e) { next(e); }
+  } catch (e) {
+    next(e);
+  }
 });
-
 module.exports = router;

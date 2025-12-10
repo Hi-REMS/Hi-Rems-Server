@@ -64,15 +64,9 @@ function createResetToken() {
   return { token, hash };
 }
 
-const loginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 50,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 const forgotLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 20,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -125,19 +119,11 @@ router.post('/register', async (req, res) => {
     );
 
     await client.query('COMMIT');
+    return res.status(201).json({ 
+      ok: true, 
+      message: '회원가입이 완료되었습니다.' 
+    });
 
-    const access = signAccessToken({ sub: user.member_id, username: user.username });
-    res
-      .cookie('access_token', access, cookieOpts())
-      .status(201)
-      .json({
-        user: {
-          id: user.member_id,
-          username: user.username,
-          worker: user.worker,
-          phoneNumber: user.phoneNumber
-        }
-      });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error(e);
@@ -147,7 +133,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', loginLimiter, async (req, res) => {
+router.post('/login', async (req, res) => {
   const { ip, ua } = clientInfo(req);
   try {
     const { username, password } = req.body || {};

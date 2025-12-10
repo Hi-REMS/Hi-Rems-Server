@@ -38,30 +38,6 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-const limiterBasic = rateLimit({
-  windowMs: 60 * 1000,
-  max: 20,
-  message: { error: 'Too many requests — try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const limiterEnergy = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: { error: 'Too many requests — try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const limiterAbnormal = rateLimit({
-  windowMs: 60 * 1000,
-  max: 15,
-  message: { error: 'Too many requests — try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 function normalizeSido(sido) {
   const map = {
     '강원': '강원도',
@@ -138,20 +114,20 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
 
   const imeis = latestRows.map(r => r.imei);
 
-  // imei_meta → 에너지원 가져오기
   const { rows: metaRows } = await pool.query(
     `SELECT imei, energy_hex FROM public.imei_meta WHERE imei = ANY($1::text[])`,
     [imeis]
   );
   const metaMap = new Map(metaRows.map(m => [m.imei, m]));
 
-  // 최근 1시간 플래그 파싱
-  const { rows: last1hRows } = await pool.query(
+const { rows: last1hRows } = await pool.query(
     `
     SELECT "rtuImei" AS imei, body, "time"
     FROM public."log_rtureceivelog"
     WHERE "time" >= NOW() - INTERVAL '1 hour'
       AND "rtuImei" = ANY($1::text[])
+      AND body IS NOT NULL  -- [추가] 빈 껍데기 데이터(NULL)는 무시!
+    ORDER BY "time" DESC
     `,
     [imeis]
   );
@@ -161,11 +137,13 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
   for (const r of last1hRows) {
     let entry = map1h.get(r.imei);
     if (!entry) {
-      entry = { frames1h: 0, hasFault1h: false, flags: [] };
+      entry = { frames1h: 0, flagsHistory: [] };
       map1h.set(r.imei, entry);
     }
 
     entry.frames1h++;
+
+    if (entry.flagsHistory.length >= 3) continue;
 
     try {
       const p = parseFrame(r.body);
@@ -176,51 +154,49 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
       else if (typeof m.statusFlags === 'number') flags = m.statusFlags;
       else if (typeof m.faultCode === 'number') flags = m.faultCode;
 
-      entry.flags.push(flags);
-
-      if ((flags & 0x1) === 1) entry.hasFault1h = true;
+      entry.flagsHistory.push(flags);
     } catch (_) {}
   }
 
-  // ⭐ 태양광 낮/밤 구분
   const hourKST = new Date().getHours();
-  const isNightTime = (hourKST < 8 || hourKST >= 17);  // 08~17만 낮
+  const isNightTime = (hourKST < 8 || hourKST >= 17);
 
   const devices = latestRows.map(r => {
-    const h = map1h.get(r.imei) || { frames1h: 0, hasFault1h: false, flags: [] };
+    const h = map1h.get(r.imei) || { frames1h: 0, flagsHistory: [] };
     const minutesSince = (Date.now() - new Date(r.last_time).getTime()) / 60000;
 
     const energy = metaMap.get(r.imei)?.energy_hex || null;
-
     const isPV = energy === '01';
     const isThermal = energy === '02';
     const isGeo = energy === '03';
 
     let reason = 'NORMAL';
 
-    // ---------------------------
-    // ⭐ ① 태양광 야간 → 항상 NORMAL
-    // ---------------------------
     if (isPV && isNightTime) {
       reason = 'NORMAL';
     }
 
-    // ---------------------------
-    // ⭐ ② 태양열/지열 OFFLINE 완화
-    // ---------------------------
     else if ((isThermal || isGeo) && minutesSince >= 240) {
       reason = 'OFFLINE';
     }
-
-    // ---------------------------
-    // ⭐ ③ 기본 Fault/Offline/OPMODE 로직
-    // ---------------------------
     else {
-      if (h.frames1h > 0 && h.hasFault1h) {
+
+      const recentFlags = h.flagsHistory;
+      const isConsecutiveFault = 
+          recentFlags.length >= 3 &&
+          recentFlags[0] > 0 && // 가장 최신
+          recentFlags[1] > 0 && // 직전
+          recentFlags[2] > 0;   // 전전
+
+      if (isConsecutiveFault) {
         reason = 'FAULT_BIT';
-      } else if (minutesSince >= offlineMin) {
+      } 
+
+      else if (minutesSince >= offlineMin) {
         reason = 'OFFLINE';
-      } else if (r.op_mode !== '0') {
+      } 
+
+      else if (r.op_mode !== '0') {
         reason = 'OPMODE_ABNORMAL';
       }
     }
@@ -230,9 +206,12 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
       op_mode: r.op_mode,
       last_time: r.last_time,
       minutes_since: Number(minutesSince.toFixed(1)),
+      
+      // 프론트엔드 호환성을 위해 기존 필드 유지하되, 내용은 최신값 기준
       frames_1h: h.frames1h,
-      has_fault_1h: h.hasFault1h ? 1 : 0,
-      flags_1h: h.flags || [],
+      has_fault_1h: (h.flagsHistory[0] > 0) ? 1 : 0, // 가장 최신 데이터 기준
+      flags_1h: h.flagsHistory, // 전체 히스토리 넘김 (디버깅용)
+      
       energy,
       reason,
     };
@@ -242,7 +221,7 @@ async function computeHealthSnapshot(lookbackDays, offlineMin) {
   return { devices, byImei };
 }
 
-router.get('/basic', limiterBasic, async (req, res, next) => {
+router.get('/basic', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
@@ -309,7 +288,7 @@ const normal_plants   = total_plants - abnormal_plants;
   }
 });
 
-router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
+router.get('/abnormal/list', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
@@ -426,7 +405,7 @@ router.get('/abnormal/list', limiterAbnormal, async (req, res, next) => {
   }
 });
 
-router.get('/abnormal/summary', limiterAbnormal, async (req, res, next) => {
+router.get('/abnormal/summary', async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
@@ -546,7 +525,7 @@ const { devices } = snapshot;
   }
 });
 
-router.get('/energy', limiterEnergy, async (_req, res, next) => {
+router.get('/energy', async (_req, res, next) => {
   try {
     const { getCache } = require('../jobs/energyRefresh');
     const { getNationwideEnergySummary } = require('../energy/summary');
@@ -724,7 +703,6 @@ router.get('/normal/points', async (req, res) => {
         m.worker
       FROM latest l
       LEFT JOIN public.imei_meta m ON m.imei = l.imei
-      WHERE l."opMode" = '0'
       ORDER BY l.last_time DESC;
     `;
 

@@ -14,11 +14,11 @@ const makeLimiter = (maxPerMin) =>
     legacyHeaders: false,
   });
 
-const limiterKey      = makeLimiter(20); // /kakao-jskey
-const limiterGeocode  = makeLimiter(15); // /geocode (외부 API 호출)
-const limiterList     = makeLimiter(30); // / (목록 조회)
-const limiterAggSido  = makeLimiter(20); // /agg/sido
-const limiterAggSigu  = makeLimiter(30); // /agg/sigungu
+const limiterKey      = makeLimiter(100); // /kakao-jskey
+const limiterGeocode  = makeLimiter(100); // /geocode (외부 API 호출)
+const limiterList     = makeLimiter(100); // / (목록 조회)
+const limiterAggSido  = makeLimiter(100); // /agg/sido
+const limiterAggSigu  = makeLimiter(100); // /agg/sigungu
 
 router.get('/kakao-jskey', limiterKey, (_req, res) => {
   const key = process.env.KAKAO_JS_KEY || '';
