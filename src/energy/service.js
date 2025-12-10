@@ -662,7 +662,8 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
       return res.status(422).json({
         ok: false,
         code: "NO_DATA",
-        message: "최근 정상 프레임이 없습니다."
+        message: "최근 정상 프레임이 없습니다.",
+        rtuImei: imei
       });
     }
     const p = parseFrame(row.body);
@@ -689,7 +690,7 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
       energy: p.energy,
       type: p.type,
       multi: useMulti ?? multiFromFrame,
-
+      rtuImei: imei,
       pv_voltage_v: m.pvVoltage ?? null,
       pv_current_a: m.pvCurrent ?? null,
       pv_power_w:
