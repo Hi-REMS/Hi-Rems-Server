@@ -23,7 +23,6 @@ const RECENT_WINDOW_BY_ENERGY = {
   '07': 14,
 };
 
-// [추가] 집계 뷰를 사용해야 하는 장기 조회 범위 목록
 const AGGREGATE_RANGES = ['yearly', 'last4weeks', 'monthly', 'weekly'];
 
 function okClause(req) {
@@ -119,7 +118,6 @@ if (startQ && endQ) {
       endUtc   = kstEndExclusiveUtc(endQ);
       bucket   = 'day';
     } else if (range === 'yearly') {
-      // ... (yearly 로직 유지) ...
       const nowKST = new Date(
         new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' })
       );
@@ -132,27 +130,16 @@ if (startQ && endQ) {
       }
       bucket = 'day';
       
-    // 🚨 [수정 포인트] monthly를 last4weeks와 동일하게 처리하거나 last4weeks 로직 활용
     } else if (range === 'last4weeks' || range === 'monthly') { 
       const nowKST = new Date(
         new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' })
       );
-      // 오늘 날짜의 00:00:00 (KST 기준)
       const todayKST = new Date(nowKST.getFullYear(), nowKST.getMonth(), nowKST.getDate());
       
-      // endUtc: 오늘 00:00:00 (오늘 데이터 제외, 어제까지 꽉 채운 데이터)
-      // 만약 오늘 데이터도 포함하려면 nowKST를 그대로 쓰세요.
-      // 보통 통계는 어제까지의 데이터를 보여주는 경우가 많습니다.
       const end = todayKST; 
       
-      // startUtc: 28일 전 (4주 전)
       const start = new Date(todayKST.getTime() - 28 * 24 * 3600 * 1000);
-      
-      // UTC 변환 (이미 Date 객체이므로 쿼리 파라미터로 넘길 때 자동 변환되거나 DB가 알아서 처리)
-      // 정확한 UTC 값을 원한다면 -9시간 보정 필요할 수 있음 (기존 getRangeUtc 로직 참고)
-      
-      // 기존 로직을 최대한 활용하여 UTC로 변환 (timeutil.js 의존성 고려)
-      // 여기서는 심플하게 Date 객체로 설정
+
       startUtc = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), -9));
       endUtc   = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), -9));
       
@@ -175,15 +162,11 @@ if (startQ && endQ) {
       }
     }
 
-    // =========================================================================
-    // [핵심 변경] 쿼리 분기: 장기 조회(AGGREGATE) vs 단기 조회(RAW)
-    // =========================================================================
     let sql, tableUsed;
     const isAggregateQuery = AGGREGATE_RANGES.includes(range) && !wantHourly;
     const params = [imei, startUtc, endUtc];
 
     if (isAggregateQuery) {
-        // [CASE A] 장기 조회: 집계 뷰 사용 (성능 최적화)
         params.push(energyHex);
         
         let aggConds = [
@@ -212,7 +195,6 @@ if (startQ && endQ) {
         tableUsed = 'AGGREGATE';
 
     } else {
-        // [CASE B] 단기 조회: 원본 테이블 사용 (기존 로직)
         const conds = [
           `"rtuImei" = $1`,
           `"time" >= $2`,
@@ -246,17 +228,14 @@ if (startQ && endQ) {
         tableUsed = 'RAW';
     }
 
-    // DB 쿼리 실행
     const dbStartTime = Date.now();
     const { rows } = await pool.query(sql, params);
     const dbEndTime   = Date.now();
     const dbMs        = dbEndTime - dbStartTime;
 
-    // 데이터 후처리
     let perKey = new Map();
     
     if (tableUsed === 'AGGREGATE') {
-        // [CASE A 후처리] 집계 데이터 처리
         for (const r of rows) {
             const wh = Number(r.daily_wh_diff || 0);
             if (wh <= 0) continue;
@@ -266,13 +245,12 @@ if (startQ && endQ) {
             const key  = `${bkey}|${m}`;
 
             const rec = perKey.get(key) || { dailyWh: 0, firstTs: r.time, lastTs: r.time };
-            rec.dailyWh += wh; // 이미 일별 차이값이므로 누적
+            rec.dailyWh += wh;
             rec.lastTs = r.time;
             perKey.set(key, rec);
         }
 
     } else {
-        // [CASE B 후처리] 원본 데이터 처리
         let SAMPLE_INTERVAL_MS = (energyHex === '01') ? 60 * 1000 : 10 * 60 * 1000;
         let lastProcessedTime = 0;
 
@@ -318,28 +296,20 @@ if (startQ && endQ) {
       
       let kwh;
       if (tableUsed === 'AGGREGATE') {
-          // =====================================================================
-          // ⭐ [수정됨] 집계 뷰 사용 시, 에너지원별 단위 변환 적용 (지열/태양열 보정)
-          // =====================================================================
           const rawVal = Math.max(0, rec.dailyWh);
 
           if (energyHex === '03') {
-              // 🌍 [지열] 원본이 (10 * kWh)이므로 10으로 나눔
               kwh = rawVal / 10;
           } 
           else if (energyHex === '02') {
-              // 🔥 [태양열] 원본이 (100 * kcal) -> 100으로 나눠 kcal -> 860.42로 나눠 kWh
               const kcal = rawVal / 100;
               kwh = kcal / 860.42065;
           } 
           else {
-              // ☀️ [태양광] 원본이 Wh이므로 1000으로 나눔
               kwh = rawVal / 1000;
           }
 
       } else {
-          // [CASE B] 원본 테이블 사용 (단기 조회) - 기존 로직 유지
-          // (주의: 원본 데이터도 지열/태양열 단위가 다를 수 있으므로 추후 확인 권장)
           kwh = Math.max(0, whDeltaToKwh(rec.firstWh, rec.lastWh));
       }
 

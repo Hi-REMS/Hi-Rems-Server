@@ -188,7 +188,6 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
 async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
   const { start, end, startStr, endStr } = monthStartEnd(year, month);
 
-  // 1. DB 조회 (energy_daily) - SUM 추가하여 DB단에서 1차 합산
   try {
     const { rows } = await pool.query(
       `SELECT ymd AS date, SUM(kwh) AS energy_kwh
@@ -208,7 +207,6 @@ async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
     }
   } catch {}
 
-  // 2. DB 조회 (energy_hourly)
   try {
     const { rows } = await pool.query(
       `SELECT to_char((ts AT TIME ZONE 'Asia/Seoul')::date, 'YYYYMMDD') AS date,
@@ -230,12 +228,9 @@ async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
     }
   } catch {}
 
-  // 3. API Fallback (series.js 호출)
   const seriesBase = process.env.ENERGY_SERIES_URL || 'http://localhost:3000/api/energy/series';
 
   let energyHex = null;
-  // guessEnergyHex 함수가 외부 모듈에 있다면 import가 필요하지만, 
-  // 제공된 코드 컨텍스트 상 tryOrder로 커버되므로 try-catch 유지
   try {
     energyHex = await guessEnergyHex(imei);
   } catch {}
@@ -243,8 +238,6 @@ async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
   const callSeries = async (hex) => {
     const params = {
       imei,
-      // [수정 포인트 1] range: 'daily' -> 'monthly'로 변경
-      // daily는 보통 시간별 데이터를 의미하고, monthly는 일별 합계 리스트를 의미합니다.
       range: 'monthly',
       start: startStr,
       end: endStr,
@@ -320,16 +313,12 @@ router.get('/monthCsv', async (req, res) => {
     const radArr = daily.shortwave_radiation_sum || [];
 
     const energyRows = await fetchDailyEnergyKwh(imei, year, month, multiHex);
-
-    // [수정 포인트 2] Map 생성 시 덮어쓰기 방지 (합산 로직 적용)
-    // 기존: const energyMap = new Map(energyRows.map(r => [String(r.date), r.energy_kwh]));
     
     const energyMap = new Map();
     for (const r of energyRows) {
         const key = String(r.date);
         const val = Number(r.energy_kwh) || 0;
         
-        // 키가 이미 존재하면 값을 더해줌 (멀티가 여러 개일 때 합산)
         const prev = energyMap.get(key) || 0;
         energyMap.set(key, prev + val);
     }
@@ -346,8 +335,7 @@ router.get('/monthCsv', async (req, res) => {
       if (ymdNum > todayYmd) continue;
 
       const ymd = String(ymdNum);
-      
-      // 합산된 값 가져오기 (소수점 처리)
+
       const rawKwh = energyMap.get(ymd);
       const kwh = (rawKwh !== undefined) ? (Math.round(rawKwh * 100) / 100) : '';
       

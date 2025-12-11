@@ -23,7 +23,6 @@ router.get('/geocode', async (req, res, next) => {
     const addrUrl = 'https://dapi.kakao.com/v2/local/search/address.json';
     const coordUrl = 'https://dapi.kakao.com/v2/local/geo/coord2address.json';
 
-    // ✅ 1단계: 주소 → 좌표 변환
     const addrResp = await axios.get(addrUrl, {
       params: { query },
       headers: { Authorization: `KakaoAK ${REST_KEY}` },
@@ -37,7 +36,6 @@ router.get('/geocode', async (req, res, next) => {
     const { x, y } = doc;
     let detailAddr = null;
 
-    // ✅ 2단계: 좌표 → 상세주소 역변환
     try {
       const coordResp = await axios.get(coordUrl, {
         params: { x, y },
@@ -53,7 +51,6 @@ router.get('/geocode', async (req, res, next) => {
       console.warn('[coord2address] fallback failed:', err.message);
     }
 
-    // ✅ 3단계: 결과 병합
     const result = {
       query,
       address_name: detailAddr?.address_name || doc.address_name,

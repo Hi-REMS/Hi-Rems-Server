@@ -33,14 +33,10 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-/** * 시설물 등록 또는 수정 (Upsert)
- * PUT /api/facility/:rtuImei 
- */
 router.put('/:rtuImei', requireAuth, async (req, res) => {
   const client = await pool.connect();
 
   try {
-    // 1. [기본 검증] rtuImei 확인
     const rtuImei = String(req.params.rtuImei || '').trim();
     if (!rtuImei) {
       return res.status(400).json({ message: 'URL 경로에 rtuImei가 없습니다.' });
@@ -49,9 +45,6 @@ router.put('/:rtuImei', requireAuth, async (req, res) => {
     const b = req.body || {};
     const userId = req.user?.sub || 'system';
 
-    // ---------------------------------------------------------
-    // 2. [날짜 예외 처리] 날짜 형식이 이상하면 즉시 차단 (400)
-    // ---------------------------------------------------------
     if (!isValidDate(b.install_date)) {
       return res.status(400).json({ 
         message: `'install_date' 형식이 올바르지 않습니다. (입력값: ${b.install_date})` 

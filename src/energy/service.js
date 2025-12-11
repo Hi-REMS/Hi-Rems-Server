@@ -137,14 +137,12 @@ async function lastBeforeNowByMulti(imei, { energyHex=null, typeHex=null, multiH
 async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
   const params = [imei];
   
-  // 조건절 구성
   const conds = [
     `"rtuImei" = $1`,
-    // recentSqlFor(60일) 조건은 LIMIT가 있으므로 성능에 영향을 주지 않지만 안전장치로 유지
     recentSqlFor(energyHex), 
-    `split_part(body, ' ', 5) = '00'`, // 정상 데이터만 (ERR_EQ_OK)
-    `left(body, 2) = '14'`,            // CMD_IS_14
-    `COALESCE("bodyLength", 9999) >= 12` // LEN_WITH_WH_COND
+    `split_part(body, ' ', 5) = '00'`,
+    `left(body, 2) = '14'`,
+    `COALESCE("bodyLength", 9999) >= 12`
   ];
 
   if (energyHex) { 
@@ -152,7 +150,6 @@ async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
     conds.push(`split_part(body,' ',2) = $${params.length}`); 
   }
   
-  // Type 필터 (buildTypeCondsForEnergy 로직 통합)
   const e = (energyHex || '').toLowerCase();
   const t = (typeHex || '').toLowerCase();
   
@@ -967,7 +964,6 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
     const startUtc = baseKST.startOf('day').toUTC().toJSDate();
     const endUtc   = baseKST.plus({ days: 1 }).startOf('day').toUTC().toJSDate();
 
-    // 1. 파라미터 인덱스 수동 관리
     const params = [imei, startUtc, endUtc];
     const conds = [
       `"rtuImei" = $1`,
@@ -980,14 +976,12 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
     
     let nextIndex = params.length + 1;
 
-    // 2. energyHex 조건
     if (energyHex) {
       params.push(energyHex);
       conds.push(`split_part(body,' ',2) = $${nextIndex}`);
       nextIndex++;
     }
     
-    // 3. typeHex 조건
     const e = energyHex.toLowerCase();
     const t = typeHexRaw.toLowerCase();
     
@@ -999,7 +993,6 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
         nextIndex++;
     }
     
-    // 4. multiHex 조건
     const useMulti = (multiHex && MULTI_SUPPORTED(energyHex)) ? multiHex : null;
     if (useMulti) {
       params.push(useMulti);
@@ -1021,10 +1014,8 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
       const p = pickMetrics(r.body);
       const wh = p?.wh ?? null;
       
-      // 0값 무시 로직 제거 (wh가 null인 경우만 건너뜀)
       if (wh == null) continue;
 
-      // Type 정보 가져오기
       const type = p.type || '00';
 
       let m = '00';
@@ -1036,7 +1027,6 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
 
       const hh = hourKey(new Date(r.time));
       
-      // Key에 Type을 포함시켜서 따로 집계함
       const key = `${hh}|${type}|${m}`;
       
       const rec = perHourMulti.get(key) || { firstWh: null, lastWh: null };
@@ -1061,8 +1051,6 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
         }
       }
       
-      // 파서(parser.js)가 이미 모든 에너지원에 대해 Wh 단위로 변환해두었으므로,
-      // 단순히 1000으로 나누어 kWh를 구하면 됩니다.
       const kwh = have ? Number(sumWh) / 1000.0 : 0;
       
       return { hour: hh, kwh: Math.round(kwh * 100) / 100 };
@@ -1181,14 +1169,12 @@ async function handleKPIOnly(req, res, next) {
       return res.status(422).json({ error: "NO_DATA" });
     }
 
-    // (기존 로직 유지: 멀티별 최신 데이터 추출)
     const latestMap = new Map();
     
     for (const r of rawRows) {
       const p = parseFrame(r.body);
       if (!p?.ok || !p.metrics) continue;
 
-      // SQL에서 energyHex를 걸렀지만 안전을 위해 이중 체크
       if (p.energy !== targetEnergyInt) continue;
       if (targetTypeInt && p.type !== targetTypeInt) continue;
 
@@ -1208,7 +1194,6 @@ async function handleKPIOnly(req, res, next) {
       return res.status(422).json({ error: "NO_DATA", message: "조건에 맞는 데이터가 없습니다." });
     }
 
-    // 2. 현재 상태 합산
     let totalWhSum = 0;
     let nowWSum = 0;
     let effList = [];
@@ -1229,12 +1214,10 @@ async function handleKPIOnly(req, res, next) {
       ? Math.round((effList.reduce((a, b) => a + b, 0) / effList.length) * 10) / 10
       : null;
 
-    // 3. 오늘 발전량 계산
     let todayWhSum = 0;
     const promises = latestRows.map(async (r) => {
       const parts = (r.body || "").split(/\s+/);
       const multi = parts[3] || "00";
-      // lastBeforeStartOfDay는 이미 최적화되어 있음
       const baseRow = await lastBeforeStartOfDay(imei, energyHex, typeHex, multi);
       const latestWh = parseFrame(r.body)?.metrics?.cumulativeWh;
       const baseWh = baseRow?.body 

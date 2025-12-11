@@ -755,14 +755,12 @@ router.get('/normal/points', async (req, res) => {
 
 router.get('/debug/db-time', async (req, res) => {
   const result = {
-    server_time: new Date().toString(), // Node.js 서버 시간
+    server_time: new Date().toString(),
     postgres: null,
     mysql: null,
   };
 
-  // 1. PostgreSQL 시간 확인
   try {
-    // NOW()는 타임존 포함, TO_CHAR는 포맷팅된 문자열 확인용
     const { rows } = await pool.query(`
       SELECT NOW() as raw_time, 
              TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS') as fmt_time,
@@ -773,10 +771,8 @@ router.get('/debug/db-time', async (req, res) => {
     result.postgres = { error: e.message };
   }
 
-  // 2. MySQL 시간 확인
   if (mysqlPool) {
     try {
-      // MySQL은 시스템 타임존 확인을 위해 @@global.time_zone 등도 같이 조회
       const [rows] = await mysqlPool.query(`
         SELECT NOW() as raw_time, 
                @@global.time_zone as global_tz, 
