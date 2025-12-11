@@ -1,0 +1,465 @@
+openapi: 3.0.0
+info:
+  title: Hi-REMS API Documentation
+  description: |
+    하이브리드 에너지 원격 모니터링 시스템(Hi-REMS) 백엔드 API 명세서.
+    Node.js (Express) + PostgreSQL (TimescaleDB) + MySQL 하이브리드 아키텍처.
+  version: 1.0.0
+servers:
+  - url: http://localhost:3000/api
+    description: 로컬 개발 서버
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: "admin@company.com"
+        password:
+          type: string
+          example: "password123!"
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string }
+        new_password: { type: string }
+    FacilityUpdate:
+      type: object
+      properties:
+        module_capacity: { type: string }
+        install_date: { type: string, format: date }
+        monitor_start: { type: string, format: date }
+        project_name: { type: string }
+        contractor: { type: string }
+        as_contact: { type: string }
+        image_url: { type: string }
+    MaintenanceCreate:
+      type: object
+      required: [rtuImei]
+      properties:
+        rtuImei: { type: string }
+        lastInspection: { type: string, format: date, example: "2025-12-11" }
+        asNotes: { type: string }
+    MemberUpdate:
+      type: object
+      properties:
+        worker: { type: string }
+        username: { type: string }
+        phoneNumber: { type: string }
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+tags:
+  - name: Auth
+    description: 로그인, 로그아웃, 비밀번호 관리
+  - name: Dashboard
+    description: 대시보드 통계 및 지도 데이터
+  - name: Energy
+    description: 실시간 발전량, 시계열 데이터, KPI
+  - name: Facility
+    description: 설비 메타 정보 및 유지보수 관리
+  - name: Weather
+    description: 기상청(ASOS) 및 Open-Meteo 기상 데이터
+  - name: Admin
+    description: 회원 관리 (관리자 전용)
+  - name: Utils
+    description: 헬스 체크 및 기타 유틸리티
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: 회원가입
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, worker, phoneNumber]
+              properties:
+                username: { type: string }
+                password: { type: string }
+                worker: { type: string }
+                phoneNumber: { type: string }
+      responses:
+        201: { description: 성공 }
+        409: { description: 이미 존재하는 이메일 }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: 로그인
+      description: 성공 시 HttpOnly 쿠키(access_token) 발급
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        200: { description: 성공 }
+        401: { description: 인증 실패 }
+        429: { description: 너무 많은 요청 }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: 로그아웃
+      responses:
+        200: { description: 쿠키 삭제됨 }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: 내 정보 조회
+      responses:
+        200: { description: 현재 로그인한 유저 정보 }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: 비밀번호 변경
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+      responses:
+        200: { description: 변경 성공 }
+        400: { description: 이전 비밀번호 불일치 또는 정책 위반 }
+
+  /auth/forgot:
+    post:
+      tags: [Auth]
+      summary: 비밀번호 찾기 (이메일 발송)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+      responses:
+        200: { description: 이메일 발송됨 }
+
+  /auth/reset:
+    post:
+      tags: [Auth]
+      summary: 비밀번호 재설정 (토큰 이용)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+                new_password: { type: string }
+      responses:
+        200: { description: 재설정 성공 }
+
+  /user/imeis:
+    get:
+      tags: [Auth]
+      summary: 내 담당 장비 목록 (IMEI) 조회
+      description: MySQL 레거시 DB에서 담당자명/전화번호로 매칭된 장비 목록 조회
+      responses:
+        200:
+          description: 장비 리스트 반환
+
+  /dashboard/basic:
+    get:
+      tags: [Dashboard]
+      summary: 대시보드 기초 통계 (KPI)
+      parameters:
+        - { name: lookbackDays, in: query, schema: { type: integer, default: 30 } }
+        - { name: offlineMin, in: query, schema: { type: integer, default: 90 } }
+      responses:
+        200: { description: 전체/정상/이상 개수, 금일 수신량 등 }
+
+  /dashboard/energy:
+    get:
+      tags: [Dashboard]
+      summary: 전국 에너지 합계 (캐싱됨)
+      responses:
+        200: { description: 전기/열 에너지 금일/누적 합계 }
+
+  /dashboard/abnormal/summary:
+    get:
+      tags: [Dashboard]
+      summary: 이상 상태 요약 (고장/오프라인 수)
+      responses:
+        200: { description: FAULT_BIT, OFFLINE, OPMODE_ABNORMAL 카운트 }
+
+  /dashboard/abnormal/list:
+    get:
+      tags: [Dashboard]
+      summary: 이상 장비 목록 상세 조회
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        200: { description: 이상 장비 리스트 (페이징) }
+
+  /dashboard/abnormal/by-region:
+    get:
+      tags: [Dashboard]
+      summary: 지역별 이상 장비 집계
+      parameters:
+        - { name: level, in: query, schema: { type: string, enum: [sido, sigungu], default: sido } }
+        - { name: sido, in: query, schema: { type: string } }
+      responses:
+        200: { description: 지역별 고장/오프라인 통계 }
+
+  /dashboard/abnormal/points:
+    get:
+      tags: [Dashboard]
+      summary: 지도용 이상 장비 마커 (Clustering)
+      parameters:
+        - { name: reason, in: query, schema: { type: string, enum: [ALL, FAULT_BIT, OFFLINE] } }
+      responses:
+        200: { description: 좌표 포함 이상 장비 리스트 }
+
+  /dashboard/normal/points:
+    get:
+      tags: [Dashboard]
+      summary: 지도용 정상 장비 마커
+      responses:
+        200: { description: 좌표 포함 정상 장비 리스트 }
+
+  /energy/kpi-fast:
+    get:
+      tags: [Energy]
+      summary: 개별 장비 실시간 KPI (Fast)
+      parameters:
+        - { name: imei, in: query, required: true, schema: { type: string } }
+        - { name: energy, in: query, schema: { type: string, default: "01" } }
+      responses:
+        200: { description: 현재출력, 금일발전량, 효율 등 }
+
+  /energy/series:
+    get:
+      tags: [Energy]
+      summary: 시계열 차트 데이터
+      description: 기간에 따라 Raw Data 또는 Daily Aggregation 자동 스위칭
+      parameters:
+        - { name: imei, in: query, required: true, schema: { type: string } }
+        - { name: range, in: query, schema: { type: string, enum: [hourly, daily, weekly, monthly, yearly] } }
+        - { name: energy, in: query, schema: { type: string, default: "01" } }
+      responses:
+        200: { description: 차트용 배열 데이터 }
+
+  /energy/{source}/instant:
+    get:
+      tags: [Energy]
+      summary: 에너지원별 실시간 상세 데이터
+      parameters:
+        - { name: source, in: path, required: true, schema: { type: string, enum: [electric, thermal, geothermal, wind, fuelcell, ess] } }
+        - { name: imei, in: query, required: true, schema: { type: string } }
+      responses:
+        200: { description: 전압, 전류, 온도, 유량 등 상세 필드 }
+
+  /energy/{source}/hourly:
+    get:
+      tags: [Energy]
+      summary: 에너지원별 시간대별 상세 데이터
+      parameters:
+        - { name: source, in: path, required: true, schema: { type: string, enum: [electric, thermal, geothermal, wind, fuelcell, ess] } }
+        - { name: imei, in: query, required: true, schema: { type: string } }
+        - { name: date, in: query, schema: { type: string, example: "2025-10-31" } }
+      responses:
+        200: { description: 0~23시 시간별 발전량 }
+
+  /facility:
+    get:
+      tags: [Facility]
+      summary: 설비 상세 정보 조회
+      parameters:
+        - { name: rtuImei, in: query, required: true, schema: { type: string } }
+      responses:
+        200: { description: 모듈 용량, 설치일, 이미지 등 }
+
+  /facility/{rtuImei}:
+    put:
+      tags: [Facility]
+      summary: 설비 정보 등록/수정
+      parameters:
+        - { name: rtuImei, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FacilityUpdate' }
+      responses:
+        200: { description: 저장 성공 }
+
+  /facility/upload:
+    post:
+      tags: [Facility]
+      summary: 설비 이미지 업로드
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                rtuImei: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        200: { description: 업로드된 이미지 URL 반환 }
+
+  /maintenance:
+    get:
+      tags: [Facility]
+      summary: 유지보수 이력 조회
+      parameters:
+        - { name: rtuImei, in: query, required: true, schema: { type: string } }
+      responses:
+        200: { description: 점검 이력 리스트 }
+    post:
+      tags: [Facility]
+      summary: 유지보수 이력 등록
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaintenanceCreate' }
+      responses:
+        200: { description: 등록 성공 }
+
+  /maintenance/{id}:
+    put:
+      tags: [Facility]
+      summary: 유지보수 이력 수정
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lastInspection: { type: string, format: date }
+                asNotes: { type: string }
+      responses:
+        200: { description: 수정 성공 }
+    delete:
+      tags: [Facility]
+      summary: 유지보수 이력 삭제
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        200: { description: 삭제 성공 }
+
+  /members:
+    get:
+      tags: [Admin]
+      summary: 전체 회원 목록 조회
+      responses:
+        200: { description: 회원 리스트 }
+
+  /members/{id}:
+    put:
+      tags: [Admin]
+      summary: 회원 정보 수정
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberUpdate' }
+      responses:
+        200: { description: 수정 성공 }
+
+  /weather/openmeteo/by-imei/daily:
+    get:
+      tags: [Weather]
+      summary: 장비(IMEI) 위치 기반 주간 예보
+      parameters:
+        - { name: imei, in: query, required: true, schema: { type: string } }
+      responses:
+        200: { description: 해당 장비 위치의 기상 예보 및 ASOS 정보 }
+
+  /weather/asos/daily:
+    get:
+      tags: [Weather]
+      summary: 기상청 ASOS 일별 관측값
+      description: 기상자료개방포털 API 프록시
+      parameters:
+        - { name: stnId, in: query, schema: { type: string, default: "108" } }
+        - { name: start, in: query, schema: { type: string, example: "20231001" } }
+        - { name: end, in: query, schema: { type: string, example: "20231031" } }
+      responses:
+        200: { description: 일별 기상 관측 데이터 }
+
+  /logs:
+    get:
+      tags: [Logs]
+      summary: RAW 수신 로그 조회
+      parameters:
+        - { name: imei, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        200: { description: RTU 수신 로그 리스트 }
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: 주문 목록 조회 (테스트용)
+      responses:
+        200: { description: 주문 리스트 }
+
+  /export/monthCsv:
+    get:
+      tags: [Energy]
+      summary: 월간 발전량 CSV 다운로드
+      description: 발전량 + 일사량 + 일조시간 병합 데이터
+      parameters:
+        - { name: imei, in: query, required: true, schema: { type: string } }
+        - { name: year, in: query, required: true, schema: { type: integer } }
+        - { name: month, in: query, required: true, schema: { type: integer } }
+      responses:
+        200:
+          description: CSV 파일 다운로드
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+
+  /rems:
+    get:
+      tags: [REMS]
+      summary: REMS 설비 목록 조회 (MySQL)
+      responses:
+        200: { description: 설비 리스트 }
+
+  /rems/geocode:
+    get:
+      tags: [REMS]
+      summary: 주소 -> 좌표 변환 (Kakao API)
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+      responses:
+        200: { description: 위도(y), 경도(x) 반환 }
+
+  /health:
+    get:
+      tags: [Utils]
+      summary: 서버 상태 확인
+      responses:
+        200: { description: Uptime 및 상태 반환 }
+
+  /api/health-direct:
+    get:
+      tags: [Utils]
+      summary: DB 연결 상태 확인 (Direct)
+      responses:
+        200: { description: DB 현재 시간 반환 }

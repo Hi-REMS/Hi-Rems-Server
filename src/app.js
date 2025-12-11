@@ -6,6 +6,9 @@ const cookieParser = require('cookie-parser');
 const api = require('./api');
 const path = require('path');
 const fs = require('fs');
+const swaggerUi = require('swagger-ui-express');
+const YAML = require('yamljs');
+
 const { setupEnergyCron } = require('./jobs/energyRefresh');
 const { getNormalPointsCached } = require('./jobs/normalPointCache');
 const app = express();
@@ -41,6 +44,18 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+try {
+  const swaggerSpec = YAML.load(path.join(__dirname, '../swagger.yaml'));
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  console.log('📄 Swagger UI is available at /api-docs');
+} catch (err) {
+  console.error('⚠️ Failed to load swagger.yaml:', err.message);
+}
+
+app.get('/swagger.yaml', (req, res) => {
+  res.sendFile(path.join(__dirname, '../swagger.yaml'));
+});
+
 app.use('/api', api);
 
 app.get('/api/health-direct', async (_req, res) => {
@@ -57,6 +72,8 @@ setupEnergyCron();
 
 const dist = path.join(__dirname, '../frontend/dist');
 app.get(/^\/(?!api\/).*/, async (req, res, next) => {
+  if (req.path.startsWith('/api-docs') || req.path === '/swagger.yaml') return next();
+
   try {
     let normalPoints = [];
     try {
@@ -66,9 +83,14 @@ app.get(/^\/(?!api\/).*/, async (req, res, next) => {
     }
 
     const htmlPath = path.join(dist, 'index.html');
+    
+    if (!fs.existsSync(htmlPath)) {
+       return res.status(404).send('Frontend build not found.');
+    }
+
     let html = fs.readFileSync(htmlPath, 'utf8');
     const preloadScript = `<script>window.__NORMAL_POINTS__=${JSON.stringify(normalPoints)};</script>`;
-    html = html.replace('<!--__PRELOAD_NORMAL_POINTS__-->', preloadScript);
+    html = html.replace('', preloadScript);
 
     res.setHeader('Cache-Control', 'no-cache');
     res.type('html').send(html);
@@ -85,8 +107,8 @@ app.use((err, _req, res, _next) => {
   res.status(status).json(body);
 });
 
-// 서버 시작
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => {
   console.log(`🚀 API listening on port ${port} (env: ${process.env.NODE_ENV})`);
+  console.log(`📄 Swagger Docs: http://localhost:${port}/api-docs`);
 });
