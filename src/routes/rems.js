@@ -5,28 +5,13 @@ const rateLimit = require('express-rate-limit');
 const { mysqlPool } = require('../db/db.mysql');
 const { pool: pg } = require('../db/db.pg'); 
 
-const makeLimiter = (maxPerMin) =>
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: maxPerMin,
-    message: { error: 'Too many requests — try again later.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-  });
-
-const limiterKey      = makeLimiter(100); // /kakao-jskey
-const limiterGeocode  = makeLimiter(100); // /geocode (외부 API 호출)
-const limiterList     = makeLimiter(100); // / (목록 조회)
-const limiterAggSido  = makeLimiter(100); // /agg/sido
-const limiterAggSigu  = makeLimiter(100); // /agg/sigungu
-
-router.get('/kakao-jskey', limiterKey, (_req, res) => {
+router.get('/kakao-jskey', (_req, res) => {
   const key = process.env.KAKAO_JS_KEY || '';
   if (!key) return res.status(500).json({ error: 'KAKAO_JS_KEY is not configured' });
   res.json({ key });
 });
 
-router.get('/geocode', limiterGeocode, async (req, res, next) => {
+router.get('/geocode', async (req, res, next) => {
   try {
     const query = (req.query.query || '').trim();
     console.log('[GEOCODE] query =', query);
@@ -88,7 +73,7 @@ router.get('/geocode', limiterGeocode, async (req, res, next) => {
   }
 });
 
-router.get('/', limiterList, async (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
     const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);
@@ -116,7 +101,7 @@ router.get('/', limiterList, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
+router.get('/agg/sido', async (_req, res, next) => {
   try {
     const sql = `
       SELECT name, COUNT(*) AS count
@@ -167,7 +152,7 @@ router.get('/agg/sido', limiterAggSido, async (_req, res, next) => {
   } catch (e) { next(e); };
 });
 
-router.get('/agg/sigungu', limiterAggSigu, async (req, res, next) => {
+router.get('/agg/sigungu', async (req, res, next) => {
   try {
     const sido = (req.query.sido || '').trim();
     if (!sido) return res.status(400).json({ error: 'sido is required' });

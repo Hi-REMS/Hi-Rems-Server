@@ -164,7 +164,7 @@ const { rows: last1hRows } = await pool.query(
   const devices = latestRows.map(r => {
     const h = map1h.get(r.imei) || { frames1h: 0, flagsHistory: [] };
     const minutesSince = (Date.now() - new Date(r.last_time).getTime()) / 60000;
-
+    
     const energy = metaMap.get(r.imei)?.energy_hex || null;
     const isPV = energy === '01';
     const isThermal = energy === '02';
@@ -201,21 +201,23 @@ const { rows: last1hRows } = await pool.query(
       }
     }
 
+    const kstDate = new Date(r.last_time);
+    kstDate.setHours(kstDate.getHours() + 9); 
+    const lastTimeKST = kstDate.toISOString().replace('T', ' ').substring(0, 19); 
+
     return {
       imei: r.imei,
       op_mode: r.op_mode,
-      last_time: r.last_time,
+      last_time: lastTimeKST,
+      
       minutes_since: Number(minutesSince.toFixed(1)),
-      
-      // 프론트엔드 호환성을 위해 기존 필드 유지하되, 내용은 최신값 기준
       frames_1h: h.frames1h,
-      has_fault_1h: (h.flagsHistory[0] > 0) ? 1 : 0, // 가장 최신 데이터 기준
-      flags_1h: h.flagsHistory, // 전체 히스토리 넘김 (디버깅용)
-      
+      has_fault_1h: (h.flagsHistory[0] > 0) ? 1 : 0,
+      flags_1h: h.flagsHistory,
       energy,
       reason,
     };
-  });
+});
 
   const byImei = new Map(devices.map(d => [d.imei, d]));
   return { devices, byImei };
@@ -749,6 +751,46 @@ router.get('/normal/points', async (req, res) => {
     console.error('normal/points error:', err);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+router.get('/debug/db-time', async (req, res) => {
+  const result = {
+    server_time: new Date().toString(), // Node.js 서버 시간
+    postgres: null,
+    mysql: null,
+  };
+
+  // 1. PostgreSQL 시간 확인
+  try {
+    // NOW()는 타임존 포함, TO_CHAR는 포맷팅된 문자열 확인용
+    const { rows } = await pool.query(`
+      SELECT NOW() as raw_time, 
+             TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS') as fmt_time,
+             current_setting('TIMEZONE') as timezone
+    `);
+    result.postgres = rows[0];
+  } catch (e) {
+    result.postgres = { error: e.message };
+  }
+
+  // 2. MySQL 시간 확인
+  if (mysqlPool) {
+    try {
+      // MySQL은 시스템 타임존 확인을 위해 @@global.time_zone 등도 같이 조회
+      const [rows] = await mysqlPool.query(`
+        SELECT NOW() as raw_time, 
+               @@global.time_zone as global_tz, 
+               @@session.time_zone as session_tz
+      `);
+      result.mysql = rows[0];
+    } catch (e) {
+      result.mysql = { error: e.message };
+    }
+  } else {
+    result.mysql = { status: 'MySQL Pool is not configured' };
+  }
+
+  res.json(result);
 });
 
 module.exports = router;

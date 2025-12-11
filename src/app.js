@@ -34,7 +34,7 @@ app.get('/health', (_req, res) => {
 
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 200,
+  max: 10000,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => (req.path || '') === '/api/health-direct',

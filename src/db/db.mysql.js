@@ -20,6 +20,12 @@ const mysqlPool = mysql.createPool({
   connectionLimit: Number(MYSQL_CONN_LIMIT) || 10,
   waitForConnections: true,
   ssl: MYSQL_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  timezone: '+09:00',
+  dateStrings: true,
+});
+
+mysqlPool.on('connection', (connection) => {
+  connection.query('SET time_zone = "+09:00"');
 });
 
 module.exports = { mysqlPool };

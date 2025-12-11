@@ -3,16 +3,8 @@ const router = express.Router();
 const { pool } = require('../db/db.pg');
 const rateLimit = require('express-rate-limit');
 
-const ordersLimiter = rateLimit({
-  windowMs: 60 * 1000, 
-  max: 40,            
-  message: { error: 'Too many requests — try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
-
-router.get('/', ordersLimiter, async (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 200);
     const offset = Math.max(parseInt(req.query.offset || '0',  10), 0);

@@ -64,13 +64,6 @@ function createResetToken() {
   return { token, hash };
 }
 
-const forgotLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 router.post('/register', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -196,7 +189,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
     const ok = await argon2.verify(me.password, current_password);
     if (!ok) return res.status(400).json({ message: '현재 비밀번호가 올바르지 않습니다.' });
-
+d
     const policyErrors = validatePassword(new_password, me.username);
     if (policyErrors.length) {
       return res.status(400).json({ message: policyErrors.join(' ') });
@@ -261,7 +254,7 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-router.post('/forgot', forgotLimiter, async (req, res) => {
+router.post('/forgot', async (req, res) => {
   const client = await pool.connect();
   try {
     const raw = (req.body && req.body.username) || '';

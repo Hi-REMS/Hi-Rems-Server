@@ -47,11 +47,11 @@ const makeLimiter = (maxPerMin) =>
     legacyHeaders: false,
   });
 
-const limiterKPI       = makeLimiter(50);
-const limiterPreview   = makeLimiter(50);
-const limiterDebug     = makeLimiter(50);
-const limiterInstant   = makeLimiter(50);
-const limiterInstantM  = makeLimiter(50);
+const limiterKPI       = makeLimiter(150);
+const limiterPreview   = makeLimiter(150);
+const limiterDebug     = makeLimiter(150);
+const limiterInstant   = makeLimiter(150);
+const limiterInstantM  = makeLimiter(150);
 const limiterHourly    = makeLimiter(300);
 
 const jsonSafe = (obj) =>

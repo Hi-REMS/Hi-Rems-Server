@@ -4,15 +4,7 @@ const { pool } = require('../db/db.pg');
 const { requireAuth } = require('../middlewares/requireAuth');
 const router = express.Router();
 
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-// 1. 조회 (GET) - 타임존 버그 수정 버전 유지
-router.get('/', requireAuth, limiter, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const rtuImei = String(req.query.rtuImei || '').trim();
     if (!rtuImei) return res.status(400).json({ message: 'rtuImei required' });
@@ -50,9 +42,8 @@ router.get('/', requireAuth, limiter, async (req, res) => {
   }
 });
 
-// 2. 등록 (POST) - [수정됨] 부모 테이블(facility_maintenance)도 같이 업데이트
-router.post('/', requireAuth, limiter, async (req, res) => {
-  // 트랜잭션 처리를 위해 클라이언트 연결
+router.post('/', requireAuth, async (req, res) => {
+
   const client = await pool.connect(); 
   
   try {
@@ -68,19 +59,14 @@ router.post('/', requireAuth, limiter, async (req, res) => {
     
     console.log('[POST] DB 저장 시도:', { rtuImei, maintenanceDate, asNotes });
 
-    // 트랜잭션 시작 (두 테이블 작업이 모두 성공해야 함)
     await client.query('BEGIN');
 
-    // [Step 1] 이력 테이블(History)에 기록 추가 (N 관계)
     await client.query(
       `INSERT INTO public.facility_maintenance_history (rtuImei, maintenance_date, as_notes)
        VALUES ($1, $2, $3)`,
       [rtuImei, maintenanceDate || null, asNotes || null]
     );
 
-    // [Step 2] 메인 테이블(Maintenance) 현황 업데이트 (1 관계)
-    // 설명: 해당 rtuImei가 없으면 INSERT, 있으면 최근 점검일과 비고를 UPDATE 합니다.
-    // (이 기능을 위해 rtuimei 컬럼에 UNIQUE 제약조건이 필요합니다)
     await client.query(
       `INSERT INTO public.facility_maintenance (rtuimei, last_inspection, as_notes, updated_at)
        VALUES ($1, $2, $3, NOW())
@@ -92,7 +78,6 @@ router.post('/', requireAuth, limiter, async (req, res) => {
       [rtuImei, maintenanceDate || null, asNotes || null]
     );
 
-    // 트랜잭션 커밋 (저장 확정)
     await client.query('COMMIT');
 
     console.log('[POST] DB 저장 완료 (History 추가 + Main 갱신)');
@@ -100,18 +85,15 @@ router.post('/', requireAuth, limiter, async (req, res) => {
     return res.json({ ok: true, message: 'Maintenance record created and status updated' });
 
   } catch (e) {
-    // 에러 발생 시 롤백 (취소)
     await client.query('ROLLBACK');
     console.error('[maintenance][POST] 에러 발생:', e);
     return res.status(500).json({ message: 'maintenance creation failed' });
   } finally {
-    // 연결 해제
     client.release();
   }
 });
 
-// 3. 수정 (PUT) - 기존 로직 유지
-router.put('/:id', requireAuth, limiter, async (req, res) => {
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) return res.status(400).json({ message: 'Record ID required' });
@@ -137,8 +119,7 @@ router.put('/:id', requireAuth, limiter, async (req, res) => {
   }
 });
 
-// 4. 삭제 (DELETE) - 기존 로직 유지
-router.delete('/:id', requireAuth, limiter, async (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) return res.status(400).json({ message: 'Record ID required' });
