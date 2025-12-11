@@ -122,7 +122,7 @@ const args = [
 (async () => {
   try {
     const now = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
-    console.log(`\n[${now}] IMEI 메타 데이터 동기화 작업을 시작합니다.`);
+    console.log(`\n[${now}] IMEI 메타 데이터 동기화 작업 시작`);
     console.log('▶ IMEI 메타 동기화 시작');
 
 const sql = `
