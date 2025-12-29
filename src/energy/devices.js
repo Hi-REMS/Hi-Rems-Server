@@ -83,6 +83,7 @@ async function resolveImeis(qRaw) {
   return { imeis: all };
 }
 
+// [수정된 부분]
 async function resolveOneImeiOrThrow(qRaw) {
   const q = (qRaw || '').trim();
   const { imeis } = await resolveImeis(q);
@@ -122,7 +123,21 @@ async function resolveOneImeiOrThrow(qRaw) {
     }
   }
 
-  return imeis[0];
+  const imei = imeis[0];
+  let name = null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT worker FROM public.imei_meta WHERE imei = $1`,
+      [imei]
+    );
+    if (rows.length > 0 && rows[0].worker) {
+      name = rows[0].worker;
+    }
+  } catch (e) {
+
+  }
+
+  return { imei, name };
 }
 
 module.exports = { resolveImeis, resolveOneImeiOrThrow, isImeiLike };

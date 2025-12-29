@@ -321,8 +321,8 @@ router.get('/abnormal/list', async (req, res, next) => {
         if (b.severity !== a.severity) return b.severity - a.severity;
         return b.minutes_since - a.minutes_since;
       });
+    
     const sliced = abnormal.slice(offset, offset + limit);
-
     const imeis = sliced.map(s => s.imei);
 
     let metaMap = new Map();
@@ -344,18 +344,19 @@ router.get('/abnormal/list', async (req, res, next) => {
       });
 
       if (lacks.length) {
+
         const sql = `
           SELECT
-            COALESCE(rtu.rtuImei, rems.rtu_id) AS imei,
+            rtu.rtuImei AS imei,
             COALESCE(rems.address, '') AS address,
             rems.worker AS worker
-          FROM rems_rems AS rems
-          LEFT JOIN rtu_rtu AS rtu
-            ON rtu.id = rems.rtu_id
+          FROM rtu_rtu AS rtu
+          LEFT JOIN rems_rems AS rems
+            ON rems.rtu_id = rtu.id
           WHERE rtu.rtuImei IN (${lacks.map(()=>'?').join(',')})
-             OR rems.rtu_id  IN (${lacks.map(()=>'?').join(',')})
         `;
-        const [rows] = await mysqlPool.query(sql, [...lacks, ...lacks]);
+
+        const [rows] = await mysqlPool.query(sql, lacks);
 
         for (const r of rows) {
           const { sido, sigungu } = parseKoreanAddress(r.address || '');
@@ -378,8 +379,13 @@ router.get('/abnormal/list', async (req, res, next) => {
       }
     }
 
+    const UNMAPPED_MSG = '현장 설치나 매핑 작업이 아직 안 된 상태입니다. 상세 모니터링에서 검색 후 조회해주세요.';
+
     const enriched = sliced.map(s => {
       const m = metaMap.get(s.imei) || {};
+      
+      const hasAddress = !!(m.address && m.address.trim());
+
       return {
         ...s,
         address: m.address || '',
@@ -390,7 +396,9 @@ router.get('/abnormal/list', async (req, res, next) => {
         worker: m.worker || null,
         energy: m.energy_hex ?? null,
         type: m.type_hex ?? null,
-        multi: m.multi_count ?? null
+        multi: m.multi_count ?? null,
+
+        display_message: hasAddress ? null : UNMAPPED_MSG
       };
     });
 

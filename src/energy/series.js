@@ -100,7 +100,7 @@ router.get('/series', seriesLimiter, async (req, res, next) => {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     if (!q) return res.status(400).json({ error: 'imei 필요' });
 
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei, name } = await resolveOneImeiOrThrow(q);
 
     const range     = (req.query.range || 'weekly').toLowerCase();
     const energyHex = (req.query.energy || '01').toLowerCase();
@@ -426,7 +426,7 @@ if (startQ && endQ) {
     );
 
     res.json({
-      deviceInfo: { rtuImei: imei, tz: TZ },
+      deviceInfo: { rtuImei: imei, name: name, tz: TZ },
       params: {
         range,
         energy_hex: energyHex,

@@ -160,9 +160,6 @@ async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
      conds.push(`split_part(body,' ',3) = $${params.length}`);
   }
 
-  // [최적화 핵심]
-  // 복잡한 윈도우 함수(ROW_NUMBER) 대신, 단순히 최신순으로 넉넉하게(LIMIT 300) 가져옵니다.
-  // 인덱스("rtuImei", "time" DESC)가 걸려 있으므로 이 쿼리는 0.01초도 안 걸립니다.
   const sql = `
     SELECT "time", body, split_part(body, ' ', 4) AS multi_hex
     FROM public.log_rtureceivelog
@@ -173,8 +170,6 @@ async function latestPerMulti(imei, { energyHex=null, typeHex=null } = {}) {
 
   const { rows } = await pool.query(sql, params);
 
-  // [Node.js 후처리]
-  // 가져온 최신 300개 중에서 각 멀티(multi_hex)별로 '가장 먼저 나온 것(최신)' 하나씩만 남깁니다.
   const latestMap = new Map();
   for (const r of rows) {
     const m = r.multi_hex || '00';
@@ -328,7 +323,7 @@ async function handleKPI (req, res, next, defaultEnergyHex = '01') {
       e.status = 400;
       throw e;
     }
-    const imei = await resolveOneImeiOrThrow(q);
+const { imei, name } = await resolveOneImeiOrThrow(q);
 
     let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex   = (req.query.type   || '').toLowerCase() || null;
@@ -480,7 +475,7 @@ async function handleKPI (req, res, next, defaultEnergyHex = '01') {
     const detail_hourly = await seriesPromise;
 
     res.json({
-      deviceInfo: { rtuImei: imei, latestAt: latestAtIso },
+      deviceInfo: { rtuImei: imei, name: name, latestAt: latestAtIso },
       kpis: {
         now_kw,
         today_kwh,
@@ -513,7 +508,7 @@ async function handlePreview(req, res, next, defaultEnergyHex = '') {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     let limit = Math.min(parseInt(req.query.limit || '200', 10), 2000);
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei } = await resolveOneImeiOrThrow(q);
 let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex   = (req.query.type   || '').toLowerCase();
     const onlyOk    = String(req.query.ok || '') === '1';
@@ -565,7 +560,7 @@ async function handleDebug(req, res, next, defaultEnergyHex = '') {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     const limit = Math.min(parseInt(req.query.limit || '5', 10), 50);
     if (!q) return res.status(400).json({ error: 'rtuImei/imei/name/q is required' });
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei } = await resolveOneImeiOrThrow(q);
 
 let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
 
@@ -643,7 +638,9 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
       });
     }
 
-    imei = await resolveOneImeiOrThrow(q);
+    const resolved = await resolveOneImeiOrThrow(q);
+imei = resolved.imei;
+const name = resolved.name;
 
     let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex = (req.query.type || '').toLowerCase() || null;
@@ -688,6 +685,7 @@ async function handleInstant(req, res, next, defaultEnergyHex = '01') {
       type: p.type,
       multi: useMulti ?? multiFromFrame,
       rtuImei: imei,
+      name: name,
       pv_voltage_v: m.pvVoltage ?? null,
       pv_current_a: m.pvCurrent ?? null,
       pv_power_w:
@@ -803,7 +801,7 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
       throw e;
     }
 
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei, name } = await resolveOneImeiOrThrow(q);
 
     let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
     const typeHex = (req.query.type || '').toLowerCase() || null;
@@ -935,7 +933,7 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
 
     res.json(
       jsonSafe({
-        deviceInfo: { rtuImei: imei, energy_hex: energyHex, type_hex: typeHex },
+        deviceInfo: { rtuImei: imei, name: name, energy_hex: energyHex, type_hex: typeHex },
         units,
         aggregate
       })
@@ -949,7 +947,7 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
     if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei, name } = await resolveOneImeiOrThrow(q);
 
     let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
 
@@ -1059,6 +1057,7 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
     return res.json({
       date: baseKST.toFormat('yyyy-LL-dd'),
       imei,
+      name,
       energy: energyHex,
       type: typeHexRaw || null,
       multi: useMulti || (MULTI_SUPPORTED(energyHex) ? 'all' : null),
@@ -1143,7 +1142,7 @@ async function handleKPIOnly(req, res, next) {
     const q = req.query.imei || req.query.rtuImei || req.query.name || req.query.q;
     if (!q) return res.status(400).json({ error: "imei required" });
 
-    const imei = await resolveOneImeiOrThrow(q);
+    const { imei, name } = await resolveOneImeiOrThrow(q);
 
     const energyHex = (req.query.energy || "01").toLowerCase();
     const typeHex = (req.query.type || "").toLowerCase() || null;
@@ -1295,6 +1294,7 @@ async function handleKPIOnly(req, res, next) {
       fast: true,
       deviceInfo: {
         imei,
+        name,
         energy: energyHex,
         latestAt: latestRows[0]?.time || null,
       },
@@ -1312,7 +1312,80 @@ async function handleKPIOnly(req, res, next) {
   }
 }
 
+async function handleUniversalSearch(req, res, next) {
+  try {
+    const q = req.query.q || req.query.name || req.query.imei;
+    if (!q) {
+      return res.status(400).json({ error: "검색어(q)가 필요합니다." });
+    }
+
+    // 1. 이름 -> IMEI 변환 (기존 함수 활용)
+    const { imei, name } = await resolveOneImeiOrThrow(q);
+
+    // 2. 해당 IMEI의 "가장 최신 로그" 1개만 조회 (에너지 타입 무관)
+    //    어떤 에너지원인지 모르니 조건을 최소화해서 body만 가져옵니다.
+    const sql = `
+      SELECT body, "time"
+      FROM public.log_rtureceivelog
+      WHERE "rtuImei" = $1
+        AND left(body, 2) = '14'
+        AND COALESCE("bodyLength", 9999) >= 12
+      ORDER BY "time" DESC
+      LIMIT 1
+    `;
+    
+    const { rows } = await pool.query(sql, [imei]);
+
+    if (!rows.length) {
+      // 로그가 하나도 없으면 기본값(태양광)으로 리턴하거나 에러 처리
+      // 여기서는 검색은 성공했으나 데이터가 없는 상태로 보냄
+      return res.json({ 
+        found: true, 
+        imei, 
+        name, 
+        energy: '01', 
+        ns: 'electric', 
+        message: '데이터 없음' 
+      });
+    }
+
+    // 3. 로그 파싱하여 에너지 타입 추출
+    const p = parseFrame(rows[0].body);
+    const detectedEnergyInt = p?.energy || 1; // 파싱 실패시 기본 1(태양광)
+    
+    // 4. 에너지 코드 매핑
+    let energyHex = '01';
+    let ns = 'electric';
+
+    switch (detectedEnergyInt) {
+      case 1: energyHex = '01'; ns = 'electric';   break;
+      case 2: energyHex = '02'; ns = 'thermal';    break;
+      case 3: energyHex = '03'; ns = 'geothermal'; break;
+      case 4: energyHex = '04'; ns = 'wind';       break;
+      case 6: energyHex = '06'; ns = 'fuelcell';   break;
+      case 7: energyHex = '07'; ns = 'ess';        break;
+      default: energyHex = '01'; ns = 'electric';  break;
+    }
+
+    // 5. 결과 리턴
+    return res.json({
+      found: true,
+      imei,
+      name,
+      energy: energyHex,
+      ns,
+      latestAt: rows[0].time
+    });
+
+  } catch (err) {
+    next(err);
+  }
+}
+
+
 router.get('/kpi-fast', limiterKPI, handleKPIOnly);
+
+router.get('/search', makeLimiter(100), handleUniversalSearch);
 
 // 전기(태양광 등, 기본 energy=01)
 router.get('/electric',                limiterKPI,      (req,res,n)=>handleKPI(req,res,n,'01'));
