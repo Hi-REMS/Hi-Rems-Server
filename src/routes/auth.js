@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 
 const { pool } = require('../db/db.pg');
-const { requireAuth, cookieOpts, signAccessToken } = require('../middlewares/requireAuth');
+const { requireAuth, requireAdmin, cookieOpts, signAccessToken } = require('../middlewares/requireAuth');
 
 const router = express.Router();
 
@@ -134,8 +134,9 @@ router.post('/login', async (req, res) => {
       await logLoginAttempt({ username, success: false, ip, user_agent: ua, reason: 'missing_fields' });
       return res.status(400).json({ message: 'username/password required' });
     }
+    
     const { rows } = await pool.query(
-      'SELECT member_id, username, password, worker, "phoneNumber" FROM public.members WHERE LOWER(username)=$1',
+      'SELECT member_id, username, password, worker, "phoneNumber", is_admin FROM public.members WHERE LOWER(username)=$1',
       [String(username).trim().toLowerCase()]
     );
     const user = rows[0];
@@ -153,7 +154,12 @@ router.post('/login', async (req, res) => {
 
     await logLoginAttempt({ member_id: user.member_id, username, success: true, ip, user_agent: ua, reason: null });
 
-    const access = signAccessToken({ sub: user.member_id, username: user.username });
+    const access = signAccessToken({ 
+      sub: user.member_id, 
+      username: user.username, 
+      is_admin: user.is_admin 
+    });
+
     res
       .cookie('access_token', access, cookieOpts())
       .json({
@@ -161,7 +167,8 @@ router.post('/login', async (req, res) => {
           id: user.member_id,
           username: user.username,
           worker: user.worker,
-          phoneNumber: user.phoneNumber
+          phoneNumber: user.phoneNumber,
+          is_admin: !!user.is_admin
         }
       });
   } catch (e) {
@@ -229,8 +236,8 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
     await client.query(
       `UPDATE public.auth_password_reset
-         SET used_at = COALESCE(used_at, now()), expires_at = now()
-       WHERE member_id = $1 AND used_at IS NULL AND expires_at > now()`,
+          SET used_at = COALESCE(used_at, now()), expires_at = now()
+        WHERE member_id = $1 AND used_at IS NULL AND expires_at > now()`,
       [me.member_id]
     );
 

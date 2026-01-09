@@ -12,12 +12,17 @@ function cookieOpts() {
   };
 }
 
+
 function signAccessToken(payload, sess) {
   if (!payload || payload.sub == null || !payload.username) {
     throw new Error('signAccessToken: payload must include { sub, username }');
   }
   return jwt.sign(
-    { username: payload.username, sess },
+    { 
+      username: payload.username, 
+      is_admin: !!payload.is_admin,
+      sess 
+    },
     process.env.JWT_ACCESS_SECRET,
     {
       subject: String(payload.sub),
@@ -55,17 +60,30 @@ function requireAuth(req, res, next) {
     const willExpireSoon = expMs - now <= 5 * 60 * 1000;
     if (willExpireSoon && res.cookie) {
       const newAccess = signAccessToken(
-        { sub: payload.sub, username: payload.username },
+        { sub: payload.sub, username: payload.username, is_admin: payload.is_admin },
         sess
       );
       res.cookie('access_token', newAccess, cookieOpts());
     }
 
-    req.user = { sub: payload.sub, username: payload.username };
+    req.user = { 
+      sub: payload.sub, 
+      username: payload.username, 
+      is_admin: !!payload.is_admin 
+    };
     return next();
   } catch (e) {
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
 }
 
-module.exports = { requireAuth, cookieOpts, signAccessToken };
+function requireAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    if (!req.user || !req.user.is_admin) {
+      return res.status(403).json({ message: 'Forbidden: Admin access required' });
+    }
+    next();
+  });
+}
+
+module.exports = { requireAuth, requireAdmin, cookieOpts, signAccessToken };
