@@ -154,22 +154,29 @@ router.post('/login', async (req, res) => {
 
     await logLoginAttempt({ member_id: user.member_id, username, success: true, ip, user_agent: ua, reason: null });
 
+    const loginSessionTime = Date.now(); 
+    
     const access = signAccessToken({ 
       sub: user.member_id, 
       username: user.username, 
       is_admin: user.is_admin 
-    });
+    }, loginSessionTime); 
+
+    res.setHeader('X-New-Token', access);
+    res.setHeader('Access-Control-Expose-Headers', 'X-New-Token');
 
     res
       .cookie('access_token', access, cookieOpts())
       .json({
+        ok: true,
         user: {
           id: user.member_id,
           username: user.username,
           worker: user.worker,
           phoneNumber: user.phoneNumber,
           is_admin: !!user.is_admin
-        }
+        },
+        token: access
       });
   } catch (e) {
     console.error(e);
