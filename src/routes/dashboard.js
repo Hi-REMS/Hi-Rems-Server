@@ -6,6 +6,7 @@ const { parseFrame } = require('../energy/parser');
 const { mysqlPool } = require('../db/db.mysql');
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map();
+const { requireAuth } = require('../middlewares/requireAuth');
 
 const snapshotCache = new Map();
 const SNAPSHOT_TTL = 60 * 1000;
@@ -59,6 +60,28 @@ function normalizeSido(sido) {
     '세종특별자치시': '세종'
   };
   return map[sido] || sido || '미지정';
+}
+
+async function getAuthorizedImeis(req) {
+  if (req.user && req.user.is_admin) return null;
+
+  const { sub: member_id } = req.user;
+  
+  const { rows: member } = await pool.query(
+    'SELECT worker, "phoneNumber" FROM public.members WHERE member_id = $1',
+    [member_id]
+  );
+
+  if (!member.length) return [];
+
+  const { worker, phoneNumber } = member[0];
+
+  const { rows: devices } = await pool.query(
+    'SELECT imei FROM public.imei_meta WHERE worker = $1', 
+    [worker]
+  );
+
+  return devices.map(d => d.imei);
 }
 
 function parseKoreanAddress(addr = '') {
@@ -184,9 +207,9 @@ const { rows: last1hRows } = await pool.query(
       const recentFlags = h.flagsHistory;
       const isConsecutiveFault = 
           recentFlags.length >= 3 &&
-          recentFlags[0] > 0 && // 가장 최신
-          recentFlags[1] > 0 && // 직전
-          recentFlags[2] > 0;   // 전전
+          recentFlags[0] > 0 &&
+          recentFlags[1] > 0 &&
+          recentFlags[2] > 0;
 
       if (isConsecutiveFault) {
         reason = 'FAULT_BIT';
@@ -223,37 +246,42 @@ const { rows: last1hRows } = await pool.query(
   return { devices, byImei };
 }
 
-router.get('/basic', async (req, res, next) => {
+router.get('/basic', requireAuth, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
     const noCache      = String(req.query.nocache || '') === '1';
 
-    const cacheKey = `basic:${lookbackDays}:${offlineMin}`;
+    const memberSuffix = req.user.is_admin ? 'admin' : `user:${req.user.sub}`;
+    const cacheKey = `basic:${lookbackDays}:${offlineMin}:${memberSuffix}`;
+    
     if (!noCache) {
       const c = getCache(cacheKey);
       if (c) return res.json(c);
     }
 
     const snapKey = `${lookbackDays}:${offlineMin}`;
-let snapshot = getSnapshotCache(snapKey);
+    let snapshot = getSnapshotCache(snapKey);
 
-if (!snapshot) {
-  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
-  setSnapshotCache(snapKey, snapshot);
-}
+    if (!snapshot) {
+      snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+      setSnapshotCache(snapKey, snapshot);
+    }
 
-const { devices } = snapshot;
+    let { devices } = snapshot;
+
+    const allowedImeis = await getAuthorizedImeis(req);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
+    }
 
     const total_plants = devices.length;
+    const faultCnt   = devices.filter(d => d.reason === 'FAULT_BIT').length;
+    const offlineCnt = devices.filter(d => d.reason === 'OFFLINE').length;
+    const abnormal_plants = faultCnt + offlineCnt;
+    const normal_plants   = total_plants - abnormal_plants;
 
-const faultCnt   = devices.filter(d => d.reason === 'FAULT_BIT').length;
-const offlineCnt = devices.filter(d => d.reason === 'OFFLINE').length;
-
-const abnormal_plants = faultCnt + offlineCnt;
-const normal_plants   = total_plants - abnormal_plants;
-
-    const { rows: todayRows } = await pool.query(`
+    let todayQuery = `
       WITH bounds AS (
         SELECT
           (date_trunc('day', (now() AT TIME ZONE 'Asia/Seoul')) AT TIME ZONE 'Asia/Seoul') AS kst_start_utc,
@@ -262,11 +290,15 @@ const normal_plants   = total_plants - abnormal_plants;
       SELECT
         (SELECT COUNT(*)::int
            FROM public."log_rtureceivelog", bounds b
-           WHERE "time" >= b.kst_start_utc AND "time" < b.kst_end_utc) AS total_messages,
+           WHERE "time" >= b.kst_start_utc AND "time" < b.kst_end_utc
+           ${allowedImeis ? 'AND "rtuImei" = ANY($1)' : ''}) AS total_messages,
         (SELECT COUNT(DISTINCT "rtuImei")::int
            FROM public."log_rtureceivelog", bounds b
-           WHERE "time" >= b.kst_start_utc AND "time" < b.kst_end_utc) AS devices;
-    `);
+           WHERE "time" >= b.kst_start_utc AND "time" < b.kst_end_utc
+           ${allowedImeis ? 'AND "rtuImei" = ANY($1)' : ''}) AS devices;
+    `;
+
+    const { rows: todayRows } = await pool.query(todayQuery, allowedImeis ? [allowedImeis] : []);
 
     const payload = {
       totals: {
@@ -280,6 +312,7 @@ const normal_plants   = total_plants - abnormal_plants;
       },
       lookbackDays,
       offlineMin,
+      isAdmin: req.user.is_admin,
       cached: false,
     };
 
@@ -290,7 +323,7 @@ const normal_plants   = total_plants - abnormal_plants;
   }
 });
 
-router.get('/abnormal/list', async (req, res, next) => {
+router.get('/abnormal/list', requireAuth, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
@@ -305,7 +338,12 @@ router.get('/abnormal/list', async (req, res, next) => {
       setSnapshotCache(snapKey, snapshot);
     }
 
-    const { devices } = snapshot;
+    let { devices } = snapshot;
+
+    const allowedImeis = await getAuthorizedImeis(req);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
+    }
 
     const abnormal = devices
       .filter(d => d.reason !== 'NORMAL')
@@ -327,24 +365,25 @@ router.get('/abnormal/list', async (req, res, next) => {
 
     let metaMap = new Map();
     try {
-      const { rows: metas } = await pool.query(
-        `SELECT imei, address, sido, sigungu, lat, lon,
-                energy_hex, type_hex, multi_count, worker
-         FROM public.imei_meta
-         WHERE imei = ANY($1::text[])`,
-        [imeis]
-      );
-      metaMap = new Map(metas.map(m => [m.imei, m]));
+      if (imeis.length > 0) {
+        const { rows: metas } = await pool.query(
+          `SELECT imei, address, sido, sigungu, lat, lon,
+                  energy_hex, type_hex, multi_count, worker
+           FROM public.imei_meta
+           WHERE imei = ANY($1::text[])`,
+          [imeis]
+        );
+        metaMap = new Map(metas.map(m => [m.imei, m]));
+      }
     } catch (_) {}
 
-    if (mysqlPool) {
+    if (mysqlPool && imeis.length > 0) {
       const lacks = imeis.filter(i => {
         const m = metaMap.get(i);
         return !m || !m.address;
       });
 
       if (lacks.length) {
-
         const sql = `
           SELECT
             rtu.rtuImei AS imei,
@@ -355,13 +394,11 @@ router.get('/abnormal/list', async (req, res, next) => {
             ON rems.rtu_id = rtu.id
           WHERE rtu.rtuImei IN (${lacks.map(()=>'?').join(',')})
         `;
-
         const [rows] = await mysqlPool.query(sql, lacks);
 
         for (const r of rows) {
           const { sido, sigungu } = parseKoreanAddress(r.address || '');
           const old = metaMap.get(r.imei) || {};
-
           metaMap.set(r.imei, {
             ...old,
             imei: r.imei,
@@ -369,11 +406,6 @@ router.get('/abnormal/list', async (req, res, next) => {
             worker: r.worker || old.worker || null,
             sido,
             sigungu,
-            lat: old.lat ?? null,
-            lon: old.lon ?? null,
-            energy_hex: old.energy_hex ?? null,
-            type_hex: old.type_hex ?? null,
-            multi_count: old.multi_count ?? null,
           });
         }
       }
@@ -383,7 +415,6 @@ router.get('/abnormal/list', async (req, res, next) => {
 
     const enriched = sliced.map(s => {
       const m = metaMap.get(s.imei) || {};
-      
       const hasAddress = !!(m.address && m.address.trim());
 
       return {
@@ -397,7 +428,6 @@ router.get('/abnormal/list', async (req, res, next) => {
         energy: m.energy_hex ?? null,
         type: m.type_hex ?? null,
         multi: m.multi_count ?? null,
-
         display_message: hasAddress ? null : UNMAPPED_MSG
       };
     });
@@ -415,27 +445,34 @@ router.get('/abnormal/list', async (req, res, next) => {
   }
 });
 
-router.get('/abnormal/summary', async (req, res, next) => {
+router.get('/abnormal/summary', requireAuth, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
     const noCache      = String(req.query.nocache || '') === '1';
 
-    const cacheKey = `abn-summary:${lookbackDays}:${offlineMin}`;
+    const userSuffix = req.user.is_admin ? 'admin' : `user:${req.user.sub}`;
+    const cacheKey = `abn-summary:${lookbackDays}:${offlineMin}:${userSuffix}`;
+
     if (!noCache) {
       const c = getCache(cacheKey);
       if (c) return res.json(c);
     }
 
     const snapKey = `${lookbackDays}:${offlineMin}`;
-let snapshot = getSnapshotCache(snapKey);
+    let snapshot = getSnapshotCache(snapKey);
 
-if (!snapshot) {
-  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
-  setSnapshotCache(snapKey, snapshot);
-}
+    if (!snapshot) {
+      snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+      setSnapshotCache(snapKey, snapshot);
+    }
 
-const { devices } = snapshot;
+    let { devices } = snapshot;
+
+    const allowedImeis = await getAuthorizedImeis(req);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
+    }
 
     const summary = {
       FAULT_BIT:        devices.filter(d => d.reason === 'FAULT_BIT').length,
@@ -451,7 +488,7 @@ const { devices } = snapshot;
   }
 });
 
-router.get('/abnormal/by-region', async (req, res) => {
+router.get('/abnormal/by-region', requireAuth, async (req, res) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '120', 10), 10);
@@ -463,14 +500,19 @@ router.get('/abnormal/by-region', async (req, res) => {
     }
 
     const snapKey = `${lookbackDays}:${offlineMin}`;
-let snapshot = getSnapshotCache(snapKey);
+    let snapshot = getSnapshotCache(snapKey);
 
-if (!snapshot) {
-  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
-  setSnapshotCache(snapKey, snapshot);
-}
+    if (!snapshot) {
+      snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+      setSnapshotCache(snapKey, snapshot);
+    }
 
-const { devices } = snapshot;
+    let { devices } = snapshot;
+
+    const allowedImeis = await getAuthorizedImeis(req);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
+    }
 
     const abnormal = devices.filter(d => d.reason !== 'NORMAL');
 
@@ -535,29 +577,124 @@ const { devices } = snapshot;
   }
 });
 
-router.get('/energy', async (_req, res, next) => {
-  try {
-    const { getCache } = require('../jobs/energyRefresh');
-    const { getNationwideEnergySummary } = require('../energy/summary');
 
-    const c = getCache();
-    if (c?.electric && c?.thermal) {
-      return res.json({
-        ok: true,
-        data: { electric: c.electric, thermal: c.thermal },
-        cached: true,
-        updatedAt: c.updatedAt,
-      });
+router.get('/energy', requireAuth, async (req, res, next) => {
+  try {
+    const rawImeis = await getAuthorizedImeis(req);
+    
+    console.log(`[Energy Debug] User: ${req.user.sub}, Original IMEIs:`, rawImeis);
+
+    if (rawImeis === null) {
+      const { getCache } = require('../jobs/energyRefresh');
+      const { getNationwideEnergySummary } = require('../energy/summary');
+      const c = getCache();
+      if (c?.electric && c?.thermal) return res.json({ ok: true, data: c, cached: true });
+      const data = await getNationwideEnergySummary();
+      return res.json({ ok: true, data });
     }
 
-    const data = await getNationwideEnergySummary();
-    res.json({ ok: true, data, cached: false });
+    if (rawImeis.length === 0) {
+      return res.json({ ok: true, data: { 
+        electric: { today_kwh: 0, today_co2_ton: 0, cumulative_kwh: 0, capacity_kw: 0 },
+        thermal: { today_kwh: 0, today_co2_ton: 0, cumulative_kwh: 0 }
+      }});
+    }
+
+    const cleanedImeis = rawImeis.map(i => i.replace(/-/g, ''));
+    
+    const KCAL_PER_KWH = 860.42065;
+    const ELECTRIC_CO2_PER_KWH = 0.466;
+
+    const U64_BE = (off) => `(
+      (get_byte(b, ${off})   ::numeric * 72057594037927936::numeric) +
+      (get_byte(b, ${off}+1) ::numeric * 281474976710656::numeric)   +
+      (get_byte(b, ${off}+2) ::numeric * 1099511627776::numeric)     +
+      (get_byte(b, ${off}+3) ::numeric * 4294967296::numeric)        +
+      (get_byte(b, ${off}+4) ::numeric * 16777216::numeric)          +
+      (get_byte(b, ${off}+5) ::numeric * 65536::numeric)             +
+      (get_byte(b, ${off}+6) ::numeric * 256::numeric)               +
+      (get_byte(b, ${off}+7) ::numeric)
+    )`;
+
+    const energySql = `
+      WITH target_imeis AS (
+        /* 원본 IMEI와 대시 제거 IMEI 모두 포함 */
+        SELECT unnest($1::text[]) as imei
+      ),
+      raw_data AS (
+        SELECT 
+          r."rtuImei" as imei,
+          m.energy_hex,
+          m.type_hex,
+          /* body 데이터 정제 및 decode */
+          decode(CASE WHEN length(regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g')) % 2 = 1 
+                      THEN '0' || regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g') 
+                      ELSE regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g') END, 'hex') as b
+        FROM public."log_rtureceivelog" r
+        JOIN public.imei_meta m ON (r."rtuImei" = m.imei OR REPLACE(r."rtuImei", '-', '') = REPLACE(m.imei, '-', ''))
+        WHERE (r."rtuImei" = ANY($2) OR REPLACE(r."rtuImei", '-', '') = ANY($2))
+          AND r."body" IS NOT NULL
+          AND r."time" >= NOW() - INTERVAL '24 hours' /* 기간을 24시간으로 확대 */
+      ),
+      parsed_stats AS (
+        SELECT 
+          imei,
+          energy_hex,
+          CASE 
+            WHEN energy_hex IN ('01', '1') AND type_hex IN ('01', '1') THEN ${U64_BE('5+16')}
+            WHEN energy_hex IN ('01', '1') AND type_hex IN ('02', '2') THEN ${U64_BE('5+28')}
+            WHEN energy_hex IN ('02', '2') THEN ${U64_BE('5+28')}
+            ELSE 0 
+          END as cum_val
+        FROM raw_data
+        WHERE b IS NOT NULL 
+          AND get_byte(b, 0) = 20 /* 0x14 프로토콜 확인 */
+      ),
+      agg AS (
+        SELECT 
+          energy_hex,
+          MIN(cum_val) as min_v,
+          MAX(cum_val) as max_v
+        FROM parsed_stats
+        GROUP BY imei, energy_hex
+      )
+      SELECT
+        COALESCE(SUM(CASE WHEN energy_hex IN ('01', '1') THEN (max_v - min_v) ELSE 0 END), 0)::numeric / 1000 as solar_today,
+        COALESCE(SUM(CASE WHEN energy_hex IN ('01', '1') THEN max_v ELSE 0 END), 0)::numeric / 1000 as solar_total,
+        COALESCE(SUM(CASE WHEN energy_hex IN ('02', '2') THEN (max_v - min_v) ELSE 0 END), 0)::numeric / ${KCAL_PER_KWH} as thermal_today,
+        COALESCE(SUM(CASE WHEN energy_hex IN ('02', '2') THEN max_v ELSE 0 END), 0)::numeric / ${KCAL_PER_KWH} as thermal_total
+      FROM agg;
+    `;
+
+    const { rows } = await pool.query(energySql, [rawImeis, [...rawImeis, ...cleanedImeis]]);
+    const s = rows[0];
+
+    console.log(`[Energy Debug] Result:`, s);
+
+    res.json({
+      ok: true,
+      data: {
+        electric: {
+          today_kwh: Number(Number(s.solar_today || 0).toFixed(3)),
+          today_co2_ton: Number((Number(s.solar_today || 0) * ELECTRIC_CO2_PER_KWH / 1000).toFixed(3)),
+          cumulative_kwh: Number(Number(s.solar_total || 0).toFixed(3)),
+          capacity_kw: 3
+        },
+        thermal: {
+          today_kwh: Number(Number(s.thermal_today || 0).toFixed(3)),
+          today_co2_ton: Number((Number(s.thermal_today || 0) * 0.198 / 1000).toFixed(3)),
+          cumulative_kwh: Number(Number(s.thermal_total || 0).toFixed(3))
+        }
+      }
+    });
+
   } catch (e) {
+    console.error('❌ /energy 필터링 에러:', e);
     next(e);
   }
 });
 
-router.get('/abnormal/points', async (req, res, next) => {
+router.get('/abnormal/points', requireAuth, async (req, res, next) => {
   try {
     const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '30', 10), 1);
     const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90',  10), 10);
@@ -566,14 +703,19 @@ router.get('/abnormal/points', async (req, res, next) => {
     const filterSigungu= (req.query.sigungu || '').trim();
 
     const snapKey = `${lookbackDays}:${offlineMin}`;
-let snapshot = getSnapshotCache(snapKey);
+    let snapshot = getSnapshotCache(snapKey);
 
-if (!snapshot) {
-  snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
-  setSnapshotCache(snapKey, snapshot);
-}
+    if (!snapshot) {
+      snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+      setSnapshotCache(snapKey, snapshot);
+    }
 
-const { devices } = snapshot;
+    let { devices } = snapshot;
+
+    const allowedImeis = await getAuthorizedImeis(req);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
+    }
 
     let rows = devices.filter(d => d.reason !== 'NORMAL');
     if (reasonFilter !== 'ALL') {
@@ -588,15 +730,13 @@ const { devices } = snapshot;
     try {
       const { rows: metas } = await pool.query(
         `SELECT imei, address, sido, sigungu, lat, lon,
-                energy_hex, type_hex, multi_count,
-                worker
+                energy_hex, type_hex, multi_count, worker
          FROM public.imei_meta
          WHERE imei = ANY($1::text[])`,
         [imeis]
       );
       metaMap = new Map(metas.map(m => [m.imei, m]));
-    } catch (_) {
-    }
+    } catch (_) {}
 
     if (mysqlPool) {
       const lacks = rows.filter(r => {
@@ -615,12 +755,10 @@ const { devices } = snapshot;
             COALESCE(rems.address, '') AS address,
             rems.worker AS worker
           FROM rems_rems AS rems
-          LEFT JOIN rtu_rtu AS rtu
-            ON rtu.id = rems.rtu_id
+          LEFT JOIN rtu_rtu AS rtu ON rtu.id = rems.rtu_id
           WHERE rtu.rtuImei IN (${batchImeis.map(()=>'?').join(',')})
              OR rems.rtu_id  IN (${batchImeis.map(()=>'?').join(',')})
         `;
-
         const [mrows] = await mysqlPool.query(sql, [...batchImeis, ...batchImeis]);
 
         for (const m of mrows) {
@@ -631,21 +769,18 @@ const { devices } = snapshot;
             imei: m.imei,
             address: m.address || '',
             worker: m.worker || existing.worker || null,
-            sido,
-            sigungu,
+            sido, sigungu,
             lat: existing.lat ?? null,
             lon: existing.lon ?? null,
             energy_hex: existing.energy_hex ?? null,
-            type_hex:   existing.type_hex   ?? null,
+            type_hex: existing.type_hex ?? null,
             multi_count: existing.multi_count ?? null,
           });
         }
       }
     }
 
-    const norm = s =>
-      (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
-
+    const norm = s => (s || '').replace(/\s+/g, '').replace(/도|시|군|구|특별자치시|광역시/g, '');
     const wantSido = filterSido ? norm(normalizeSido(filterSido)) : null;
     const wantSigun = filterSigungu ? norm(filterSigungu) : null;
 
@@ -664,7 +799,6 @@ const { devices } = snapshot;
         op_mode: r.op_mode,
         last_time: r.last_time,
         minutes_since: r.minutes_since,
-
         sido,
         sigungu,
         address: meta.address || '',
@@ -678,16 +812,18 @@ const { devices } = snapshot;
     }
 
     res.json({ ok: true, items });
-
   } catch (e) {
     next(e);
   }
 });
 
-router.get('/normal/points', async (req, res) => {
+router.get('/normal/points', requireAuth, async (req, res) => {
   try {
     const lookbackDays = Number(req.query.lookbackDays || 3);
+    const allowedImeis = await getAuthorizedImeis(req);
 
+    const imeiFilterSql = allowedImeis ? 'AND r."rtuImei" = ANY($2)' : '';
+    
     const sql = `
       WITH latest AS (
         SELECT DISTINCT ON (r."rtuImei")
@@ -696,6 +832,7 @@ router.get('/normal/points', async (req, res) => {
           r."time" AS last_time
         FROM public."log_rtureceivelog" r
         WHERE r."time" >= NOW() - make_interval(days => $1)
+        ${imeiFilterSql} -- [추가] 본인의 장비만 조회되도록 필터 적용
         ORDER BY r."rtuImei", r."time" DESC
       )
       SELECT 
@@ -716,7 +853,8 @@ router.get('/normal/points', async (req, res) => {
       ORDER BY l.last_time DESC;
     `;
 
-    const { rows } = await pool.query(sql, [lookbackDays]);
+    const queryParams = allowedImeis ? [lookbackDays, allowedImeis] : [lookbackDays];
+    const { rows } = await pool.query(sql, queryParams);
 
     const items = rows
       .filter(r => r.lat && r.lon)
@@ -736,20 +874,13 @@ router.get('/normal/points', async (req, res) => {
       }));
 
     const pending = rows.length - items.length;
-
     res.json({ ok: true, items, pending });
 
     const noCoords = rows.filter(r => !r.lat || !r.lon);
     if (noCoords.length > 0) {
-      console.log(`🛰️ Found ${noCoords.length} normal points without coords — background sync start...`);
-
       setTimeout(async () => {
         try {
-          if (typeof syncLatLon === 'function') {
-            await syncLatLon();
-          } else {
-            console.warn('syncLatLon not available; skip background sync');
-          }
+          if (typeof syncLatLon === 'function') await syncLatLon();
         } catch (e) {
           console.error('❌ Background syncLatLon() error:', e);
         }
