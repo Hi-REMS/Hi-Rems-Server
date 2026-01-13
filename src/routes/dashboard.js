@@ -77,8 +77,8 @@ async function getAuthorizedImeis(req) {
   const { worker, phoneNumber } = member[0];
 
   const { rows: devices } = await pool.query(
-    'SELECT imei FROM public.imei_meta WHERE worker = $1', 
-    [worker]
+    'SELECT imei FROM public.imei_meta WHERE worker = $1 AND "phoneNumber" = $2', 
+    [worker, phoneNumber]
   );
 
   return devices.map(d => d.imei);
@@ -728,78 +728,65 @@ router.get('/abnormal/points', requireAuth, async (req, res, next) => {
   }
 });
 
-router.get('/normal/points', requireAuth, async (req, res) => {
+
+router.get('/normal/points', requireAuth, async (req, res, next) => {
   try {
-    const lookbackDays = Number(req.query.lookbackDays || 3);
+    const lookbackDays = Math.max(parseInt(req.query.lookbackDays || '3', 10), 1);
+    const offlineMin   = Math.max(parseInt(req.query.offlineMin   || '90', 10), 10);
+
+    const snapshot = await computeHealthSnapshot(lookbackDays, offlineMin);
+    let { devices } = snapshot;
+
     const allowedImeis = await getAuthorizedImeis(req);
-
-    const imeiFilterSql = allowedImeis ? 'AND r."rtuImei" = ANY($2)' : '';
-    
-    const sql = `
-      WITH latest AS (
-        SELECT DISTINCT ON (r."rtuImei")
-          r."rtuImei" AS imei,
-          r."opMode",
-          r."time" AS last_time
-        FROM public."log_rtureceivelog" r
-        WHERE r."time" >= NOW() - make_interval(days => $1)
-        ${imeiFilterSql} -- [추가] 본인의 장비만 조회되도록 필터 적용
-        ORDER BY r."rtuImei", r."time" DESC
-      )
-      SELECT 
-        l.imei, 
-        l."opMode" AS op_mode, 
-        l.last_time,
-        m.sido, 
-        m.sigungu, 
-        m.address, 
-        m.lat, 
-        m.lon,
-        m.energy_hex,
-        m.type_hex,
-        m.multi_count,
-        m.worker
-      FROM latest l
-      LEFT JOIN public.imei_meta m ON m.imei = l.imei
-      ORDER BY l.last_time DESC;
-    `;
-
-    const queryParams = allowedImeis ? [lookbackDays, allowedImeis] : [lookbackDays];
-    const { rows } = await pool.query(sql, queryParams);
-
-    const items = rows
-      .filter(r => r.lat && r.lon)
-      .map(r => ({
-        imei: r.imei,
-        op_mode: r.op_mode,
-        last_time: r.last_time,
-        sido: r.sido,
-        sigungu: r.sigungu,
-        address: r.address,
-        lat: r.lat,
-        lon: r.lon,
-        worker: r.worker || null,
-        energy: r.energy_hex ?? null,
-        type: r.type_hex ?? null,
-        multi: r.multi_count ?? null
-      }));
-
-    const pending = rows.length - items.length;
-    res.json({ ok: true, items, pending });
-
-    const noCoords = rows.filter(r => !r.lat || !r.lon);
-    if (noCoords.length > 0) {
-      setTimeout(async () => {
-        try {
-          if (typeof syncLatLon === 'function') await syncLatLon();
-        } catch (e) {
-          console.error('❌ Background syncLatLon() error:', e);
-        }
-      }, 2000);
+    if (allowedImeis) {
+      devices = devices.filter(d => allowedImeis.includes(d.imei));
     }
-  } catch (err) {
-    console.error('normal/points error:', err);
-    res.status(500).json({ ok: false, error: err.message });
+
+    const normalDevices = devices.filter(d => d.reason === 'NORMAL');
+
+    if (!normalDevices.length) {
+      return res.json({ ok: true, items: [] });
+    }
+
+    const imeis = normalDevices.map(d => d.imei);
+
+    const { rows: metas } = await pool.query(
+      `SELECT imei, address, sido, sigungu, lat, lon,
+              energy_hex, type_hex, multi_count, worker
+       FROM public.imei_meta
+       WHERE imei = ANY($1::text[])`,
+      [imeis]
+    );
+
+    const metaMap = new Map(metas.map(m => [m.imei, m]));
+
+    const items = normalDevices.map(d => {
+      const m = metaMap.get(d.imei) || {};
+      return {
+        ...d,
+        sido: m.sido || '',
+        sigungu: m.sigungu || '',
+        address: m.address || '',
+        lat: m.lat || null,
+        lon: m.lon || null,
+        worker: m.worker || null,
+        energy: m.energy_hex || null,
+        type: m.type_hex || null,
+        multi: m.multi_count || null
+      };
+    });
+
+    const filteredItems = items.filter(it => it.lat && it.lon);
+
+    res.json({ 
+      ok: true, 
+      items: filteredItems,
+      count: filteredItems.length
+    });
+
+  } catch (e) {
+    console.error('❌ /normal/points error:', e);
+    next(e);
   }
 });
 

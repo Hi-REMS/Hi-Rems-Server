@@ -88,10 +88,10 @@ async function upsertImeiMeta(pgPool, row) {
 INSERT INTO public.imei_meta(
   imei, address, sido, sigungu, lat, lon,
   energy_hex, type_hex, multi_count,
-  worker,
+  worker, "phoneNumber",  -- ◀ [추가]
   updated_at
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
 ON CONFLICT (imei) DO UPDATE SET
   address = EXCLUDED.address,
   sido = EXCLUDED.sido,
@@ -102,6 +102,7 @@ ON CONFLICT (imei) DO UPDATE SET
   type_hex = EXCLUDED.type_hex,
   multi_count = EXCLUDED.multi_count,
   worker = EXCLUDED.worker,
+  "phoneNumber" = EXCLUDED."phoneNumber",
   updated_at = now()
   `;
 const args = [
@@ -114,7 +115,8 @@ const args = [
   row.energyHex,
   row.typeHex,
   row.multiCount,
-  row.worker
+  row.worker,
+  row.phoneNumber
 ];
   await pgPool.query(q, args);
 }
@@ -129,7 +131,8 @@ const sql = `
       SELECT
         rtu.rtuImei AS imei,
         COALESCE(rems.address, '') AS address,
-        rems.worker AS worker
+        rems.worker AS worker,
+        rems.phoneNumber AS phoneNumber
       FROM rtu_rtu AS rtu
       LEFT JOIN rems_rems AS rems
         ON rems.rtu_id = rtu.id
@@ -191,7 +194,8 @@ const sql = `
             energyHex: energyInfo?.energyHex || null,
             typeHex: energyInfo?.typeHex || null,
             multiCount: energyInfo?.multiCount || 1,
-            worker: src.worker || null
+            worker: src.worker || null,
+            phoneNumber: src.phoneNumber || null
           });
 
           processed++;
