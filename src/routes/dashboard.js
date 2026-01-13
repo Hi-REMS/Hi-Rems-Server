@@ -580,116 +580,27 @@ router.get('/abnormal/by-region', requireAuth, async (req, res) => {
 
 router.get('/energy', requireAuth, async (req, res, next) => {
   try {
-    const rawImeis = await getAuthorizedImeis(req);
-    
-    console.log(`[Energy Debug] User: ${req.user.sub}, Original IMEIs:`, rawImeis);
+    const { getEnergySummary } = require('../energy/summary');
+    const imeiList = await getAuthorizedImeis(req);
 
-    if (rawImeis === null) {
-      const { getCache } = require('../jobs/energyRefresh');
-      const { getNationwideEnergySummary } = require('../energy/summary');
-      const c = getCache();
-      if (c?.electric && c?.thermal) return res.json({ ok: true, data: c, cached: true });
-      const data = await getNationwideEnergySummary();
-      return res.json({ ok: true, data });
-    }
+    console.log(`\n=== [Energy API Debug Start] ===`);
+    console.log(`- User ID: ${req.user.sub}`);
+    console.log(`- Device Count: ${imeiList ? imeiList.length : 'ALL (Admin)'}`);
+    if (imeiList) console.log(`- IMEIs: ${JSON.stringify(imeiList)}`);
 
-    if (rawImeis.length === 0) {
-      return res.json({ ok: true, data: { 
-        electric: { today_kwh: 0, today_co2_ton: 0, cumulative_kwh: 0, capacity_kw: 0 },
-        thermal: { today_kwh: 0, today_co2_ton: 0, cumulative_kwh: 0 }
-      }});
-    }
+    const summary = await getEnergySummary(imeiList);
 
-    const cleanedImeis = rawImeis.map(i => i.replace(/-/g, ''));
-    
-    const KCAL_PER_KWH = 860.42065;
-    const ELECTRIC_CO2_PER_KWH = 0.466;
-
-    const U64_BE = (off) => `(
-      (get_byte(b, ${off})   ::numeric * 72057594037927936::numeric) +
-      (get_byte(b, ${off}+1) ::numeric * 281474976710656::numeric)   +
-      (get_byte(b, ${off}+2) ::numeric * 1099511627776::numeric)     +
-      (get_byte(b, ${off}+3) ::numeric * 4294967296::numeric)        +
-      (get_byte(b, ${off}+4) ::numeric * 16777216::numeric)          +
-      (get_byte(b, ${off}+5) ::numeric * 65536::numeric)             +
-      (get_byte(b, ${off}+6) ::numeric * 256::numeric)               +
-      (get_byte(b, ${off}+7) ::numeric)
-    )`;
-
-    const energySql = `
-      WITH target_imeis AS (
-        /* 원본 IMEI와 대시 제거 IMEI 모두 포함 */
-        SELECT unnest($1::text[]) as imei
-      ),
-      raw_data AS (
-        SELECT 
-          r."rtuImei" as imei,
-          m.energy_hex,
-          m.type_hex,
-          /* body 데이터 정제 및 decode */
-          decode(CASE WHEN length(regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g')) % 2 = 1 
-                      THEN '0' || regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g') 
-                      ELSE regexp_replace(r.body, '[^0-9A-Fa-f]', '', 'g') END, 'hex') as b
-        FROM public."log_rtureceivelog" r
-        JOIN public.imei_meta m ON (r."rtuImei" = m.imei OR REPLACE(r."rtuImei", '-', '') = REPLACE(m.imei, '-', ''))
-        WHERE (r."rtuImei" = ANY($2) OR REPLACE(r."rtuImei", '-', '') = ANY($2))
-          AND r."body" IS NOT NULL
-          AND r."time" >= NOW() - INTERVAL '24 hours' /* 기간을 24시간으로 확대 */
-      ),
-      parsed_stats AS (
-        SELECT 
-          imei,
-          energy_hex,
-          CASE 
-            WHEN energy_hex IN ('01', '1') AND type_hex IN ('01', '1') THEN ${U64_BE('5+16')}
-            WHEN energy_hex IN ('01', '1') AND type_hex IN ('02', '2') THEN ${U64_BE('5+28')}
-            WHEN energy_hex IN ('02', '2') THEN ${U64_BE('5+28')}
-            ELSE 0 
-          END as cum_val
-        FROM raw_data
-        WHERE b IS NOT NULL 
-          AND get_byte(b, 0) = 20 /* 0x14 프로토콜 확인 */
-      ),
-      agg AS (
-        SELECT 
-          energy_hex,
-          MIN(cum_val) as min_v,
-          MAX(cum_val) as max_v
-        FROM parsed_stats
-        GROUP BY imei, energy_hex
-      )
-      SELECT
-        COALESCE(SUM(CASE WHEN energy_hex IN ('01', '1') THEN (max_v - min_v) ELSE 0 END), 0)::numeric / 1000 as solar_today,
-        COALESCE(SUM(CASE WHEN energy_hex IN ('01', '1') THEN max_v ELSE 0 END), 0)::numeric / 1000 as solar_total,
-        COALESCE(SUM(CASE WHEN energy_hex IN ('02', '2') THEN (max_v - min_v) ELSE 0 END), 0)::numeric / ${KCAL_PER_KWH} as thermal_today,
-        COALESCE(SUM(CASE WHEN energy_hex IN ('02', '2') THEN max_v ELSE 0 END), 0)::numeric / ${KCAL_PER_KWH} as thermal_total
-      FROM agg;
-    `;
-
-    const { rows } = await pool.query(energySql, [rawImeis, [...rawImeis, ...cleanedImeis]]);
-    const s = rows[0];
-
-    console.log(`[Energy Debug] Result:`, s);
+    console.log(`- [FINAL RESULT] Electric:`, summary.electric);
+    console.log(`- [FINAL RESULT] Thermal:`, summary.thermal);
+    console.log(`=== [Energy API Debug End] ===\n`);
 
     res.json({
       ok: true,
-      data: {
-        electric: {
-          today_kwh: Number(Number(s.solar_today || 0).toFixed(3)),
-          today_co2_ton: Number((Number(s.solar_today || 0) * ELECTRIC_CO2_PER_KWH / 1000).toFixed(3)),
-          cumulative_kwh: Number(Number(s.solar_total || 0).toFixed(3)),
-          capacity_kw: 3
-        },
-        thermal: {
-          today_kwh: Number(Number(s.thermal_today || 0).toFixed(3)),
-          today_co2_ton: Number((Number(s.thermal_today || 0) * 0.198 / 1000).toFixed(3)),
-          cumulative_kwh: Number(Number(s.thermal_total || 0).toFixed(3))
-        }
-      }
+      data: summary
     });
 
   } catch (e) {
-    console.error('❌ /energy 필터링 에러:', e);
+    console.error('❌ /energy API 에러:', e);
     next(e);
   }
 });
