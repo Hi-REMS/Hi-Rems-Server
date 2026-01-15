@@ -1319,11 +1319,8 @@ async function handleUniversalSearch(req, res, next) {
       return res.status(400).json({ error: "검색어(q)가 필요합니다." });
     }
 
-    // 1. 이름 -> IMEI 변환 (기존 함수 활용)
     const { imei, name } = await resolveOneImeiOrThrow(q);
 
-    // 2. 해당 IMEI의 "가장 최신 로그" 1개만 조회 (에너지 타입 무관)
-    //    어떤 에너지원인지 모르니 조건을 최소화해서 body만 가져옵니다.
     const sql = `
       SELECT body, "time"
       FROM public.log_rtureceivelog
@@ -1337,8 +1334,6 @@ async function handleUniversalSearch(req, res, next) {
     const { rows } = await pool.query(sql, [imei]);
 
     if (!rows.length) {
-      // 로그가 하나도 없으면 기본값(태양광)으로 리턴하거나 에러 처리
-      // 여기서는 검색은 성공했으나 데이터가 없는 상태로 보냄
       return res.json({ 
         found: true, 
         imei, 
@@ -1349,11 +1344,9 @@ async function handleUniversalSearch(req, res, next) {
       });
     }
 
-    // 3. 로그 파싱하여 에너지 타입 추출
     const p = parseFrame(rows[0].body);
-    const detectedEnergyInt = p?.energy || 1; // 파싱 실패시 기본 1(태양광)
+    const detectedEnergyInt = p?.energy || 1;
     
-    // 4. 에너지 코드 매핑
     let energyHex = '01';
     let ns = 'electric';
 
@@ -1367,7 +1360,6 @@ async function handleUniversalSearch(req, res, next) {
       default: energyHex = '01'; ns = 'electric';  break;
     }
 
-    // 5. 결과 리턴
     return res.json({
       found: true,
       imei,
@@ -1387,7 +1379,6 @@ router.get('/kpi-fast', limiterKPI, handleKPIOnly);
 
 router.get('/search', makeLimiter(100), handleUniversalSearch);
 
-// 전기(태양광 등, 기본 energy=01)
 router.get('/electric',                limiterKPI,      (req,res,n)=>handleKPI(req,res,n,'01'));
 router.get('/electric/preview',        limiterPreview,  (req,res,n)=>handlePreview(req,res,n,'01'));
 router.get('/electric/debug',          limiterDebug,    (req,res,n)=>handleDebug(req,res,n,'01'));
@@ -1472,7 +1463,6 @@ router.use((err, req, res, next) => {
     });
   }
 
-  // 5. 기타 서버 에러
   return res.status(err.status || 500).json({
     ok: false,
     code: "SERVER_ERROR",

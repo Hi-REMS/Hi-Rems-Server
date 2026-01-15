@@ -572,7 +572,7 @@ router.get('/abnormal/by-region', requireAuth, async (req, res) => {
     const items = [...regionAgg.values()];
     res.json({ ok: true, level, filterSido, lookbackDays, offlineMin, count: items.length, items });
   } catch (e) {
-    console.error('❌ /abnormal/by-region error:', e);
+    console.error('/abnormal/by-region error:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -600,7 +600,7 @@ router.get('/energy', requireAuth, async (req, res, next) => {
     });
 
   } catch (e) {
-    console.error('❌ /energy API 에러:', e);
+    console.error(' /energy API 에러:', e);
     next(e);
   }
 });
@@ -785,7 +785,7 @@ router.get('/normal/points', requireAuth, async (req, res, next) => {
     });
 
   } catch (e) {
-    console.error('❌ /normal/points error:', e);
+    console.error('/normal/points error:', e);
     next(e);
   }
 });

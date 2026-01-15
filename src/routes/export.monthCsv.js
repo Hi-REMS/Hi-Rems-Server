@@ -185,91 +185,71 @@ async function fetchOpenMeteoSolarDaily(lat, lon, year, month) {
   return { ok: true, daily: results };
 }
 
-async function fetchDailyEnergyKwh(imei, year, month, multiHex) {
-  const { start, end, startStr, endStr } = monthStartEnd(year, month);
+async function fetchDailyEnergyKwh(imei, year, month, multiHex, energyHex = '01') {
+  const { start, end } = monthStartEnd(year, month);
+  const targetEnergy = (energyHex || '01').toLowerCase();
+
+  const sql = `
+    WITH daily_frames AS (
+      SELECT 
+        to_char(("time" AT TIME ZONE 'Asia/Seoul'), 'YYYYMMDD') as ymd,
+        "time",
+        body
+      FROM public.log_rtureceivelog
+      WHERE "rtuImei" = $1
+        AND "time" >= $2
+        AND "time" <= $3
+        AND left(body, 2) = '14'                      -- 프로토콜 체크 (CMD_IS_14)
+        AND split_part(body, ' ', 2) = $4              -- 에너지원 체크 (energyHex)
+        AND split_part(body, ' ', 5) = '00'           -- 정상 데이터 체크 (ERR_EQ_OK)
+        AND COALESCE("bodyLength", 9999) >= 12        -- 최소 길이 체크
+        ${multiHex ? `AND split_part(body, ' ', 4) = '${multiHex.toLowerCase()}'` : ''}
+    ),
+    boundary_data AS (
+      SELECT 
+        ymd,
+        -- 날짜별 첫 번째 프레임과 마지막 프레임을 윈도우 함수로 추출
+        first_value(body) OVER(PARTITION BY ymd ORDER BY "time" ASC) as first_body,
+        last_value(body) OVER(PARTITION BY ymd ORDER BY "time" ASC 
+          RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as last_body
+      FROM daily_frames
+    )
+    SELECT DISTINCT ymd, first_body, last_body 
+    FROM boundary_data 
+    ORDER BY ymd;
+  `;
 
   try {
-    const { rows } = await pool.query(
-      `SELECT ymd AS date, SUM(kwh) AS energy_kwh
-         FROM public.energy_daily
-        WHERE imei = $1
-          AND ymd >= $2
-          AND ymd <= $3
-        GROUP BY ymd
-        ORDER BY ymd`,
-      [`${imei}`, `${year}${pad2(month)}01`, `${year}${pad2(month)}31`]
-    );
-    if (rows?.length) {
-      return rows.map(r => ({
-        date: String(r.date),
-        energy_kwh: Number(r.energy_kwh) || 0
-      }));
-    }
-  } catch {}
+    const { rows } = await pool.query(sql, [
+      imei, 
+      start.toISOString(), 
+      end.toISOString(), 
+      targetEnergy
+    ]);
+    
+    if (!rows.length) return [];
 
-  try {
-    const { rows } = await pool.query(
-      `SELECT to_char((ts AT TIME ZONE 'Asia/Seoul')::date, 'YYYYMMDD') AS date,
-              SUM(kwh)::float AS energy_kwh
-         FROM public.energy_hourly
-        WHERE imei = $1
-          AND ts >= $2
-          AND ts <  $3
-        GROUP BY 1
-        ORDER BY 1`,
-      [imei, start.toISOString(), new Date(end.getTime() + 1000).toISOString()]
-    );
+    return rows.map(r => {
+      const fParsed = parseFrame(r.first_body);
+      const lParsed = parseFrame(r.last_body);
 
-    if (rows?.length) {
-      return rows.map(r => ({
-        date: String(r.date),
-        energy_kwh: Number(r.energy_kwh) || 0
-      }));
-    }
-  } catch {}
+      const fWh = fParsed?.metrics?.cumulativeWh;
+      const lWh = lParsed?.metrics?.cumulativeWh;
 
-  const seriesBase = process.env.ENERGY_SERIES_URL || 'http://localhost:3000/api/energy/series';
+      let diffKwh = 0;
+      if (fWh != null && lWh != null && lWh >= fWh) {
+        diffKwh = Number(lWh - fWh) / 1000.0;
+      }
 
-  let energyHex = null;
-  try {
-    energyHex = await guessEnergyHex(imei);
-  } catch {}
-
-  const callSeries = async (hex) => {
-    const params = {
-      imei,
-      range: 'monthly',
-      start: startStr,
-      end: endStr,
-      energy: hex,
-    };
-
-    if (multiHex) params.multi = multiHex;
-
-    const r = await axios.get(seriesBase, {
-      params,
-      timeout: 12000,
-      validateStatus: () => true,
+      return {
+        date: r.ymd,
+        energy_kwh: diffKwh
+      };
     });
-
-    if (r.status !== 200 || !Array.isArray(r.data?.series)) return null;
-
-    return r.data.series.map((s) => ({
-      date: String(s.bucket).replace(/-/g, ''),
-      energy_kwh: Number(s.kwh) || 0,
-    }));
-  };
-
-  const tryOrder = energyHex ? [energyHex, '02', '03', '01'] : ['02', '03', '01'];
-
-  for (const hex of tryOrder) {
-    try {
-      const rows = await callSeries(hex);
-      if (rows && rows.length) return rows;
-    } catch {}
+  } catch (e) {
+    console.error('CSV Boundary Scan Error:', e);
+    return [];
   }
-
-  return [];
 }
 
 router.get('/monthCsv', async (req, res) => {

@@ -53,11 +53,7 @@ async function searchMariaByName(q) {
       FROM rtu_rtu r
       LEFT JOIN rems_rems rr ON rr.rtu_id = r.id
       WHERE
-        r.rtuimei LIKE ? OR
-        rr.worker LIKE ? OR
-        rr.address LIKE ? OR
-        rr.facCompany LIKE ? OR
-        rr.monitorCompany LIKE ?
+        rr.worker LIKE ?
       LIMIT 50
     `;
     const params = [like, like, like, like, like];
@@ -68,7 +64,7 @@ async function searchMariaByName(q) {
     return [];
   } finally {
     if (conn) conn.release();
-  }
+  }f
 }
 
 async function resolveImeis(qRaw) {
