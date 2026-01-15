@@ -2,11 +2,10 @@ const { pool } = require('../db/db.pg');
 
 const ELECTRIC_CO2_ADMIN = Number(process.env.ELECTRIC_CO2_PER_KWH || '0.466');
 const THERMAL_CO2_ADMIN  = Number(process.env.THERMAL_CO2_PER_KWH  || '0.198');
-const ELECTRIC_CO2_USER  = 0.4747;
-const THERMAL_CO2_USER   = 0.198;
+const ELECTRIC_CO2_USER   = 0.4747;
+const THERMAL_CO2_USER    = 0.198;
 const KCAL_PER_KWH       = 860.42065;
 const LOG_TBL            = process.env.LOG_TBL || 'log_rtureceivelog';
-const HOURS_LOOKBACK     = Number(process.env.ENERGY_LOOKBACK_HOURS || '8');
 
 const nz = (v) => (v == null ? 0 : Number(v));
 
@@ -26,60 +25,63 @@ const U64_SQL_USER = (off) => `((get_byte(decode(regexp_replace(body, '[^0-9A-Fa
 async function getSummaryByUser(category, imeiList) {
   const isElectric = (category === 'electric');
   const factor = isElectric ? ELECTRIC_CO2_USER : THERMAL_CO2_USER;
-  const startKST = `date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') AT TIME ZONE 'Asia/Seoul'`;
   
+  const startKST = `date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') AT TIME ZONE 'Asia/Seoul'`;
   const targetCodes = isElectric ? "('01')" : "('02', '03', '04', '06', '07')";
 
-const sql = `
+  const sql = `
     WITH base_data AS (
-      SELECT "rtuImei" as imei, split_part(body, ' ', 4) as multi, "time",
-CASE 
-  WHEN energy_hex='01' AND type_hex='01' THEN ${U64_SQL_USER(21)} -- 단상 (5+16) [cite: 226]
-  WHEN energy_hex='01' AND type_hex='02' THEN ${U64_SQL_USER(33)} -- 삼상 (5+28) [cite: 239]
-  
-  -- 강제순환형: 누적생산량은 오프셋 17 (5+12) [cite: 319, 320]
-  WHEN energy_hex='02' AND type_hex='01' THEN ${U64_SQL_USER(17)} / (${KCAL_PER_KWH} * 100.0)
-  -- 자연순환형: 누적사용량은 오프셋 13 (5+8) [cite: 346, 347]
-  WHEN energy_hex='02' AND type_hex='02' THEN ${U64_SQL_USER(13)} / (${KCAL_PER_KWH} * 100.0)
-  
-  -- 히트펌프: 누적생산량은 오프셋 15 (5+10) [cite: 391, 392]
-  WHEN energy_hex='03' THEN ${U64_SQL_USER(15)} / 10.0
-  
-  ELSE ${U64_SQL_USER(21)} / 1000.0
-END as val
+      SELECT 
+        "rtuImei" as imei, 
+        split_part(body, ' ', 4) as multi, 
+        "time",
+        CASE 
+          WHEN energy_hex='01' AND type_hex='01' THEN ${U64_SQL_USER(21)}
+          WHEN energy_hex='01' AND type_hex='02' THEN ${U64_SQL_USER(33)}
+          WHEN energy_hex='02' AND type_hex='01' THEN ${U64_SQL_USER(17)} / (${KCAL_PER_KWH} * 100.0)
+          WHEN energy_hex='02' AND type_hex='02' THEN ${U64_SQL_USER(13)} / (${KCAL_PER_KWH} * 100.0)
+          WHEN energy_hex='03' THEN ${U64_SQL_USER(15)} / 10.0
+          ELSE ${U64_SQL_USER(21)} / 1000.0
+        END as val
       FROM public.log_rtureceivelog
       JOIN public.imei_meta m ON m.imei = "rtuImei"
-      WHERE left(body, 2) = '14' AND split_part(body, ' ', 5) = '00'
+      WHERE left(body, 2) = '14' 
+        AND split_part(body, ' ', 5) = '00' 
         AND m.energy_hex IN ${targetCodes} 
         AND "rtuImei" = ANY($1)
-        AND "time" >= ${startKST} - interval '1 day'
+        AND "time" >= ${startKST}
     ),
-    baseline AS (
-      SELECT DISTINCT ON (imei, multi) imei, multi, val 
-      FROM base_data WHERE "time" < ${startKST} ORDER BY imei, multi, "time" DESC
-    ),
-    latest AS (
-      SELECT DISTINCT ON (imei, multi) imei, multi, val 
-      FROM base_data ORDER BY imei, multi, "time" DESC
+    daily_stats AS (
+      SELECT 
+        imei, multi,
+        MIN(val) as min_val,
+        MAX(val) as max_val
+      FROM base_data
+      GROUP BY imei, multi
     )
     SELECT 
-      COALESCE(SUM(l.val - COALESCE(b.val, l.val)), 0) as today_raw, 
-      COALESCE(SUM(l.val), 0) as cumulative_raw
-    FROM latest l LEFT JOIN baseline b ON l.imei = b.imei AND l.multi = b.multi
+      COALESCE(SUM(max_val - min_val), 0) as today_raw, 
+      COALESCE(SUM(max_val), 0) as cumulative_raw
+    FROM daily_stats
   `;
 
-  const { rows } = await pool.query(sql, [imeiList]);
-  const row = rows[0];
+  try {
+    const { rows } = await pool.query(sql, [imeiList]);
+    const row = rows[0] || { today_raw: 0, cumulative_raw: 0 };
 
-  const todayKwh = isElectric ? nz(row.today_raw) / 1000 : nz(row.today_raw);
-  const totalKwh = isElectric ? nz(row.cumulative_raw) / 1000 : nz(row.cumulative_raw);
+    const todayKwh = isElectric ? nz(row.today_raw) / 1000 : nz(row.today_raw);
+    const totalKwh = isElectric ? nz(row.cumulative_raw) / 1000 : nz(row.cumulative_raw);
 
-  return {
-    today_kwh: Number(todayKwh.toFixed(3)),
-    cumulative_kwh: Number(totalKwh.toFixed(3)),
-    today_co2_ton: calculateCo2Ton(todayKwh, factor),
-    capacity_kw: 0
-  };
+    return {
+      today_kwh: Number(todayKwh.toFixed(3)),
+      cumulative_kwh: Number(totalKwh.toFixed(3)),
+      today_co2_ton: calculateCo2Ton(todayKwh, factor),
+      capacity_kw: 0
+    };
+  } catch (e) {
+    console.error('getSummaryByUser SQL Error:', e);
+    throw e;
+  }
 }
 
 async function getEnergySummary(imeiList = null) {
@@ -94,6 +96,7 @@ async function getEnergySummary(imeiList = null) {
     return { electric: e, thermal: t };
   }
 }
+
 async function getElectricFromMV() {
   const sql = `SELECT COALESCE(SUM(GREATEST(max_recent - min_recent,0)),0)::numeric / 1000 AS kwh_today, COALESCE(SUM(max_recent),0)::numeric / 1000 AS kwh_cumulative FROM mv_energy_recent WHERE kind='electric'`;
   return queryRow(sql);

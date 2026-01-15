@@ -78,12 +78,7 @@ router.get('/', async (req, res, next) => {
 
     const conds = ['address IS NOT NULL', "address <> ''"];
     const args  = [];
-
-    if (search) {
-      conds.push('worker LIKE ?'); 
-      args.push(`%${search}%`); 
-    }
-
+    if (search) { conds.push('address LIKE ?'); args.push(`%${search}%`); }
     const where = `WHERE ${conds.join(' AND ')}`;
 
     const sql = `

@@ -79,7 +79,6 @@ async function resolveImeis(qRaw) {
   return { imeis: all };
 }
 
-// [수정된 부분]
 async function resolveOneImeiOrThrow(qRaw) {
   const q = (qRaw || '').trim();
   const { imeis } = await resolveImeis(q);

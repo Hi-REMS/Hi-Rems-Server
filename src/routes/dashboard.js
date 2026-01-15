@@ -149,7 +149,7 @@ const { rows: last1hRows } = await pool.query(
     FROM public."log_rtureceivelog"
     WHERE "time" >= NOW() - INTERVAL '1 hour'
       AND "rtuImei" = ANY($1::text[])
-      AND body IS NOT NULL  -- [추가] 빈 껍데기 데이터(NULL)는 무시!
+      AND body IS NOT NULL
     ORDER BY "time" DESC
     `,
     [imeis]

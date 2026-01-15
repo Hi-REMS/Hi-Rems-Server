@@ -946,51 +946,53 @@ async function handleInstantMulti(req, res, next, defaultEnergyHex = '01') {
 async function handleHourly(req, res, next, defaultEnergyHex = '01') {
   try {
     const q = req.query.rtuImei || req.query.imei || req.query.name || req.query.q;
-    if (!q) { const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.'); e.status = 400; throw e; }
+    if (!q) {
+      const e = new Error('rtuImei/imei/name/q 중 하나가 필요합니다.');
+      e.status = 400;
+      throw e;
+    }
     const { imei, name } = await resolveOneImeiOrThrow(q);
 
     let energyHex = (req.query.energy || defaultEnergyHex).toLowerCase();
-
     const typeHexRaw = (req.query.type || '').toLowerCase();
-    const typeHex    = typeHexRaw || null;
-    const multiHex   = (req.query.multi || '').toLowerCase();
-
+    const multiHex = (req.query.multi || '').toLowerCase();
     const dateStr = req.query.date;
+
     const baseKST = dateStr
       ? DateTime.fromFormat(dateStr, 'yyyy-LL-dd', { zone: TZ })
       : DateTime.now().setZone(TZ);
-    const startUtc = baseKST.startOf('day').toUTC().toJSDate();
-    const endUtc   = baseKST.plus({ days: 1 }).startOf('day').toUTC().toJSDate();
+
+    // const startOfTodayKST = baseKST.startOf('day').toUTC().toJSDate();
+    const startUtc = baseKST.minus({ hours: 1 }).startOf('hour').toUTC().toJSDate();
+    const endUtc = baseKST.endOf('day').toUTC().toJSDate();
 
     const params = [imei, startUtc, endUtc];
     const conds = [
       `"rtuImei" = $1`,
       `"time" >= $2`,
-      `"time" <  $3`,
-      CMD_IS_14,
-      ERR_EQ_OK,
-      LEN_WITH_WH_COND,
+      `"time" <= $3`,
+      `left(body,2)='14'`,
+      `split_part(body,' ',5) = '00'`,
+      `COALESCE("bodyLength", 9999) >= 12`,
     ];
-    
-    let nextIndex = params.length + 1;
 
+    let nextIndex = params.length + 1;
     if (energyHex) {
       params.push(energyHex);
       conds.push(`split_part(body,' ',2) = $${nextIndex}`);
       nextIndex++;
     }
-    
+
     const e = energyHex.toLowerCase();
     const t = typeHexRaw.toLowerCase();
-    
     if (e === '04' && (!t || t === 'auto')) {
-        conds.push(`split_part(body,' ',3) IN ('00','01')`);
+      conds.push(`split_part(body,' ',3) IN ('00','01')`);
     } else if (t) {
-        params.push(t);
-        conds.push(`split_part(body,' ',3) = $${nextIndex}`);
-        nextIndex++;
+      params.push(t);
+      conds.push(`split_part(body,' ',3) = $${nextIndex}`);
+      nextIndex++;
     }
-    
+
     const useMulti = (multiHex && MULTI_SUPPORTED(energyHex)) ? multiHex : null;
     if (useMulti) {
       params.push(useMulti);
@@ -998,60 +1000,55 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
     }
 
     const sql = `
-      SELECT "time", body
+      SELECT "time", body, split_part(body, ' ', 4) as multi_id
       FROM public.log_rtureceivelog
       WHERE ${conds.join(' AND ')}
       ORDER BY "time" ASC
     `;
     const { rows } = await pool.query(sql, params);
 
-    const hourKey = (jsDate) => DateTime.fromJSDate(jsDate).setZone(TZ).toFormat('HH');
-
-    const perHourMulti = new Map();
+    const lastWhByHour = new Map();
     for (const r of rows) {
       const p = pickMetrics(r.body);
-      const wh = p?.wh ?? null;
-      
-      if (wh == null) continue;
+      if (p?.wh == null) continue;
 
-      const type = p.type || '00';
+      const mId = (r.multi_id || '00').toLowerCase();
+      const dt = DateTime.fromJSDate(new Date(r.time)).setZone(TZ);
+      const hourKey = dt.toFormat('yyyyLLddHH');
 
-      let m = '00';
-      if (MULTI_SUPPORTED(energyHex)) {
-        const parts = (r.body || '').trim().split(/\s+/);
-        m = (parts[3] || '00').toLowerCase();
-        if (useMulti && m !== useMulti) continue;
-      }
-
-      const hh = hourKey(new Date(r.time));
-      
-      const key = `${hh}|${type}|${m}`;
-      
-      const rec = perHourMulti.get(key) || { firstWh: null, lastWh: null };
-
-      if (rec.firstWh == null) rec.firstWh = wh; 
-      rec.lastWh = wh;                           
-      perHourMulti.set(key, rec);
+      if (!lastWhByHour.has(hourKey)) lastWhByHour.set(hourKey, new Map());
+      lastWhByHour.get(hourKey).set(mId, p.wh);
     }
 
     const hours = Array.from({ length: 24 }, (_, i) => {
-      const hh = String(i).padStart(2, '0');
-      let sumWh = 0n; let have = false;
+      const currDt = baseKST.set({ hour: i });
+      const currKey = currDt.toFormat('yyyyLLddHH');
+      
+      let sumWh = 0n;
+      const currMap = lastWhByHour.get(currKey);
 
-      for (const [key, rec] of perHourMulti.entries()) {
-        if (!key.startsWith(hh + '|')) continue;
-        
-        if (rec.firstWh == null || rec.lastWh == null) continue;
+      if (currMap) {
+        for (const [mId, currWh] of currMap.entries()) {
+          let lastPrevWh = null;
+          for (let lookback = 1; lookback <= i + 1; lookback++) {
+            const olderKey = currDt.minus({ hours: lookback }).toFormat('yyyyLLddHH');
+            const olderMap = lastWhByHour.get(olderKey);
+            if (olderMap?.has(mId)) {
+              lastPrevWh = olderMap.get(mId);
+              break;
+            }
+          }
 
-        if (rec.lastWh >= rec.firstWh) {
-          sumWh += (rec.lastWh - rec.firstWh);
-          have = true;
+          if (lastPrevWh != null && currWh >= lastPrevWh) {
+            sumWh += (currWh - lastPrevWh);
+          }
         }
       }
-      
-      const kwh = have ? Number(sumWh) / 1000.0 : 0;
-      
-      return { hour: hh, kwh: Math.round(kwh * 100) / 100 };
+
+      return {
+        hour: currDt.toFormat('HH'),
+        kwh: Math.round((Number(sumWh) / 1000) * 100) / 100
+      };
     });
 
     return res.json({
@@ -1061,80 +1058,11 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
       energy: energyHex,
       type: typeHexRaw || null,
       multi: useMulti || (MULTI_SUPPORTED(energyHex) ? 'all' : null),
-      mode: 'boundary-scan-type-separated',
       hours
     });
   } catch (e) {
     next(e);
   }
-}
-
-async function lastBeforeStartOfDay(imei, energyHex, typeHex, multiHex, tsDate = null) {
-  const startUtc = tsDate || DateTime.now().toUTC().toJSDate();
-const sql = `
-    SELECT "time", body
-    FROM public.log_rtureceivelog
-    WHERE "rtuImei" = $1
-      AND "time" < $2
-      AND split_part(body, ' ', 5) = '00'        -- ◀ [필수 추가] 정상 데이터만
-      AND left(body, 2) = '14'                   -- ◀ [필수 추가] 프로토콜 확인
-      AND COALESCE("bodyLength", 9999) >= 12     -- ◀ [필수 추가] 길이 확인
-    ORDER BY "time" DESC
-    LIMIT 10
-  `;
-
-  const { rows } = await pool.query(sql, [imei, startUtc]);
-
-  const targetEnergy = (energyHex || '').toLowerCase();
-  const targetType   = (typeHex || '').toLowerCase();
-  const targetMulti  = (multiHex || '').toLowerCase();
-  
-  for (const r of rows) {
-    const p = parseFrame(r.body);
-    if (!p?.ok || !p.metrics) continue;
-
-    if (targetEnergy && p.energy !== parseInt(targetEnergy, 16)) continue;
-    if (targetType && p.type !== parseInt(targetType, 16)) continue;
-
-    if (MULTI_SUPPORTED(energyHex)) {
-       const parts = (r.body || '').trim().split(/\s+/);
-       const mHex = (parts[3] || '00').toLowerCase();
-       if (!targetMulti && mHex !== '00') continue;
-       if (targetMulti && mHex !== targetMulti) continue;
-    }
-    return r;
-  }
-
-  return null;
-}
-
-async function firstAfterTime(imei, tsDate, energyHex, typeHex, targetMulti) {
-  const sql = `
-    SELECT body FROM public.log_rtureceivelog
-    WHERE "rtuImei" = $1 AND "time" >= $2
-    ORDER BY "time" ASC
-    LIMIT 500  -- [핵심 수정] 10 -> 500 (밤새 쌓인 에러 로그를 넘기기 위함)
-  `;
-  
-  const { rows } = await pool.query(sql, [imei, tsDate]);
-  const targetEnergy = parseInt(energyHex || '01', 16);
-  const targetType = typeHex ? parseInt(typeHex, 16) : null;
-
-  for (const r of rows) {
-    const p = parseFrame(r.body);
-
-    if (!p?.metrics?.cumulativeWh) continue;
-
-    if (p.energy !== targetEnergy) continue;
-    if (targetType && p.type !== targetType) continue;
-
-    const parts = (r.body || '').split(/\s+/);
-    const m = (parts[3] || '00').toLowerCase();
-    if (targetMulti && m !== targetMulti) continue;
-
-    return Number(p.metrics.cumulativeWh);
-  }
-  return null;
 }
 
 async function handleKPIOnly(req, res, next) {
@@ -1147,148 +1075,73 @@ async function handleKPIOnly(req, res, next) {
     const energyHex = (req.query.energy || "01").toLowerCase();
     const typeHex = (req.query.type || "").toLowerCase() || null;
     const multiHex = (req.query.multi || "").toLowerCase() || null;
-    
-    const targetEnergyInt = parseInt(energyHex, 16);
-    const targetTypeInt = typeHex ? parseInt(typeHex, 16) : null;
 
-    const sqlLatest = `
-      SELECT "time", body
+    const baseKST = DateTime.now().setZone(TZ);
+    const startOfTodayKST = baseKST.startOf('day');
+    const startOfQueryUTC = startOfTodayKST.minus({ hours: 1 }).toUTC().toJSDate();
+
+    const sql = `
+      SELECT 
+        split_part(body, ' ', 4) as multi_id,
+        body,
+        "time"
       FROM public.log_rtureceivelog
       WHERE "rtuImei" = $1
+        AND "time" >= $2
         AND split_part(body, ' ', 5) = '00'
         AND left(body, 2) = '14'
+        AND split_part(body, ' ', 2) = $3
         AND COALESCE("bodyLength", 9999) >= 12
-        AND split_part(body, ' ', 2) = $2
-      ORDER BY "time" DESC
-      LIMIT 300
+      ORDER BY "time" ASC
     `;
-    const { rows: rawRows } = await pool.query(sqlLatest, [imei, energyHex]);
 
-    if (!rawRows.length) {
-      return res.status(422).json({ error: "NO_DATA" });
+    const { rows } = await pool.query(sql, [imei, startOfQueryUTC, energyHex]);
+
+    if (!rows.length) {
+      return res.status(422).json({ error: "NO_DATA", message: "조회된 데이터가 없습니다." });
     }
 
-    const latestMap = new Map();
-    
-    for (const r of rawRows) {
+    const unitMap = new Map();
+    let latestTimestamp = null;
+
+    rows.forEach(r => {
+      const mId = r.multi_id.toLowerCase();
+      if (multiHex && multiHex !== 'all' && mId !== multiHex) return;
+
       const p = parseFrame(r.body);
-      if (!p?.ok || !p.metrics) continue;
+      const wh = p?.metrics?.cumulativeWh;
+      const w = p?.metrics?.currentOutputW || 0;
+      if (wh == null) return;
 
-      if (p.energy !== targetEnergyInt) continue;
-      if (targetTypeInt && p.type !== targetTypeInt) continue;
-
-      const parts = (r.body || "").trim().split(/\s+/);
-      const mHex = (parts[3] || "00").toLowerCase();
-
-      if (multiHex && mHex !== multiHex) continue;
-
-      if (!latestMap.has(mHex)) {
-        latestMap.set(mHex, r);
+      if (!unitMap.has(mId)) {
+        unitMap.set(mId, { startWh: wh, endWh: wh, lastW: w, time: r.time });
+      } else {
+        const data = unitMap.get(mId);
+        data.endWh = wh;
+        data.lastW = w;
+        data.time = r.time;
       }
-    }
 
-    const latestRows = Array.from(latestMap.values());
-
-    if (!latestRows.length) {
-      return res.status(422).json({ error: "NO_DATA", message: "조건에 맞는 데이터가 없습니다." });
-    }
-
-    let totalWhSum = 0;
-    let nowWSum = 0;
-    let effList = [];
-
-    for (const r of latestRows) {
-      const p = parseFrame(r.body);
-      const m = p.metrics;
-
-      if (m.cumulativeWh != null) totalWhSum += Number(m.cumulativeWh);
-      if (m.currentOutputW != null) nowWSum += Number(m.currentOutputW);
-      const eff = computeInverterEfficiency(m); 
-      if (eff != null) effList.push(eff);
-    }
-
-    const total_kwh = totalWhSum > 0 ? Math.round((totalWhSum / 1000) * 100) / 100 : null;
-    const now_kw = nowWSum > 0 ? Math.round((nowWSum / 1000) * 100) / 100 : null;
-    const inverter_efficiency_pct = effList.length
-      ? Math.round((effList.reduce((a, b) => a + b, 0) / effList.length) * 10) / 10
-      : null;
-
-    let todayWhSum = 0;
-    const promises = latestRows.map(async (r) => {
-      const parts = (r.body || "").split(/\s+/);
-      const multi = parts[3] || "00";
-      const baseRow = await lastBeforeStartOfDay(imei, energyHex, typeHex, multi);
-      const latestWh = parseFrame(r.body)?.metrics?.cumulativeWh;
-      const baseWh = baseRow?.body 
-        ? parseFrame(baseRow.body)?.metrics?.cumulativeWh 
-        : null;
-
-      if (latestWh != null && baseWh != null) {
-        const diff = Number(latestWh) - Number(baseWh);
-        if (diff > 0) return diff;
+      if (!latestTimestamp || r.time > latestTimestamp) {
+        latestTimestamp = r.time;
       }
-      return 0;
     });
 
-    const results = await Promise.all(promises);
-    todayWhSum = results.reduce((a, b) => a + b, 0);
-    const today_kwh = todayWhSum > 0 ? Math.round((todayWhSum / 1000) * 100) / 100 : 0;
+    let todayWhSum = 0n;
+    let totalNowWSum = 0;
+    let totalCumulativeWhSum = 0n;
 
-
-    let last_month_avg_kw = null;
-
-    const monthQuery = `
-      SELECT
-        (date_trunc('month', ((now() AT TIME ZONE '${TZ}') - interval '1 month')) AT TIME ZONE '${TZ}') AS prev_month_utc,
-        (date_trunc('month', (now() AT TIME ZONE '${TZ}')) AT TIME ZONE '${TZ}') AS this_month_utc
-    `;
-    const { rows: monthRows } = await pool.query(monthQuery);
-    const { prev_month_utc, this_month_utc } = monthRows[0];
-
-    const aggParams = [imei, prev_month_utc, this_month_utc, energyHex];
-    let aggConds = [
-        `"rtuImei" = $1`,
-        `day >= $2`,
-        `day < $3`,
-        `energy_hex = $4`
-    ];
-
-    if (typeHex) {
-        aggParams.push(typeHex);
-        aggConds.push(`type_hex = $${aggParams.length}`);
-    }
-    if (multiHex) {
-        aggParams.push(multiHex);
-        aggConds.push(`multi_hex = $${aggParams.length}`);
-    }
-
-    const aggSql = `
-        SELECT SUM(max_wh - min_wh) AS total_wh
-        FROM log_rtureceivelog_daily
-        WHERE ${aggConds.join(' AND ')}
-    `;
-
-    const { rows: aggResult } = await pool.query(aggSql, aggParams);
-    const lastMonthTotalWh = Number(aggResult[0]?.total_wh || 0);
-
-    if (lastMonthTotalWh > 0) {
-        const hours = (new Date(this_month_utc) - new Date(prev_month_utc)) / 3600_000;
-        if (hours > 0) {
-            let monthKwh = 0;
-            // 에너지원별 단위 변환
-            if (energyHex === '01') monthKwh = lastMonthTotalWh / 1000;
-            else if (energyHex === '02') monthKwh = (lastMonthTotalWh / 100) / 860.42065;
-            else if (energyHex === '03') monthKwh = lastMonthTotalWh / 10;
-            else monthKwh = lastMonthTotalWh / 1000;
-
-            last_month_avg_kw = Math.round((monthKwh / hours) * 100) / 100;
-        }
+    for (const data of unitMap.values()) {
+      if (data.endWh >= data.startWh) {
+        todayWhSum += (data.endWh - data.startWh);
+      }
+      totalNowWSum += Number(data.lastW);
+      totalCumulativeWhSum += BigInt(data.endWh);
     }
 
     const co2Factor = CO2_FOR(energyHex);
-    const co2_kg = total_kwh != null
-      ? Math.round(total_kwh * co2Factor * 100) / 100
-      : null;
+    const total_kwh = Math.round((Number(totalCumulativeWhSum) / 1000) * 100) / 100;
+    const today_kwh = Math.round((Number(todayWhSum) / 1000.0) * 100) / 100;
 
     return res.json({
       fast: true,
@@ -1296,15 +1149,15 @@ async function handleKPIOnly(req, res, next) {
         imei,
         name,
         energy: energyHex,
-        latestAt: latestRows[0]?.time || null,
+        latestAt: latestTimestamp,
       },
       kpis: {
-        now_kw,
-        today_kwh,
-        total_kwh,
-        co2_kg,
-        inverter_efficiency_pct,
-        last_month_avg_kw,
+        now_kw: Math.round((totalNowWSum / 1000) * 100) / 100,
+        today_kwh: today_kwh,
+        total_kwh: total_kwh,
+        co2_kg: total_kwh ? Math.round(total_kwh * co2Factor * 100) / 100 : null,
+        inverter_efficiency_pct: computeInverterEfficiency(parseFrame(rows[rows.length-1].body)?.metrics || {}),
+        last_month_avg_kw: null,
       },
     });
   } catch (err) {
