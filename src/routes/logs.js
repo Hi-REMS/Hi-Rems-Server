@@ -21,7 +21,7 @@ router.get('/', async (req, res, next) => {
     const sql = `
       SELECT id, time, "deviceModel", "msgType", "opMode", "multiId", "rtuImei",
              "bodyLength",
-             LEFT(body, 80) || CASE WHEN LENGTH(body) > 80 THEN '…' ELSE '' END AS body_preview
+             LEFT(body, 80) || CASE WHEN LENGTH(body) > 80 THEN '...' ELSE '' END AS body_preview
       FROM public."log_rtureceivelog"
       ${where}
       ORDER BY time DESC

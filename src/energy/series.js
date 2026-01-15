@@ -91,8 +91,6 @@ function buildTypeCondsForEnergy(energyHex, typeHex, params) {
   return { sql:null, added:false };
 }
 
-// src/energy/service.js
-
 router.get('/series', seriesLimiter, async (req, res, next) => {
   const tAllStart = Date.now();
 

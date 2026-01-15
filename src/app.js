@@ -47,9 +47,9 @@ app.use(globalLimiter);
 try {
   const swaggerSpec = YAML.load(path.join(__dirname, '../swagger.yaml'));
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  console.log('📄 Swagger UI is available at /api-docs');
+  console.log('Swagger UI is available at /api-docs');
 } catch (err) {
-  console.error('⚠️ Failed to load swagger.yaml:', err.message);
+  console.error('Failed to load swagger.yaml:', err.message);
 }
 
 app.get('/swagger.yaml', (req, res) => {
@@ -109,6 +109,6 @@ app.use((err, _req, res, _next) => {
 
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => {
-  console.log(`🚀 API listening on port ${port} (env: ${process.env.NODE_ENV})`);
-  console.log(`📄 Swagger Docs: http://localhost:${port}/api-docs`);
+  console.log(`API listening on port ${port} (env: ${process.env.NODE_ENV})`);
+  console.log(`Swagger Docs: http://localhost:${port}/api-docs`);
 });

@@ -29,7 +29,7 @@ async function resolveImeiMeta(imei) {
   return { found: true, cid, address: row.address || null };
 }
 
-// 주소 → 좌표 
+// 주소 -> 좌표 
 async function geocodeAddress(addr) {
   if (!addr || !KAKAO_REST_KEY) return null;
   try {
