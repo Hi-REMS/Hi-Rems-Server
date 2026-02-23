@@ -9,12 +9,12 @@ async function requireAdmin(req, res, next) {
     if (!sub) return res.status(401).json({ message: 'Unauthorized' });
 
     const { rows } = await pool.query(
-      'SELECT worker FROM public.members WHERE member_id = $1',
+      'SELECT is_admin FROM public.members WHERE member_id = $1',
       [sub]
     );
     const me = rows[0];
 
-    if (!me || me.worker !== '관리자') {
+    if (!me || !me.is_admin) {
       return res.status(403).json({ message: '관리자 권한이 필요합니다.' });
     }
     next();
@@ -27,8 +27,8 @@ async function requireAdmin(req, res, next) {
 router.get('/', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT member_id, username, worker, "phoneNumber", created_at
-         FROM public.members
+      `SELECT member_id, username, worker, "phoneNumber", is_admin, created_at 
+         FROM public.members 
          ORDER BY created_at DESC`
     );
     res.json(rows);
@@ -41,43 +41,36 @@ router.get('/', requireAuth, requireAdmin, async (req, res) => {
 router.put('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { worker, username, phoneNumber } = req.body || {};
+    const { worker, username, phoneNumber, is_admin } = req.body || {};
 
     if (username) {
       const { rows: dup } = await pool.query(
-        `SELECT member_id FROM public.members
+        `SELECT member_id FROM public.members 
           WHERE username = $1 AND member_id <> $2`,
         [username, id]
       );
 
       if (dup.length > 0) {
-        return res
-          .status(409)
-          .json({ message: '이미 존재하는 이메일입니다.' });
+        return res.status(409).json({ message: '이미 존재하는 이메일입니다.' });
       }
     }
 
     await pool.query(
-      `UPDATE public.members
+      `UPDATE public.members 
           SET worker = COALESCE($1, worker),
               username = COALESCE($2, username),
-              "phoneNumber" = COALESCE($3, "phoneNumber")
-        WHERE member_id = $4`,
-      [worker, username, phoneNumber, id]
+              "phoneNumber" = COALESCE($3, "phoneNumber"),
+              is_admin = COALESCE($4, is_admin)
+        WHERE member_id = $5`,
+      [worker, username, phoneNumber, is_admin, id]
     );
 
     const { rows } = await pool.query(
-      `SELECT member_id, username, worker, "phoneNumber", created_at
-         FROM public.members
+      `SELECT member_id, username, worker, "phoneNumber", is_admin, created_at 
+         FROM public.members 
         WHERE member_id = $1`,
       [id]
     );
-
-    if (!rows.length) {
-      return res
-        .status(404)
-        .json({ message: '해당 회원을 찾을 수 없습니다.' });
-    }
 
     res.json({
       ok: true,
