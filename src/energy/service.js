@@ -1071,31 +1071,41 @@ async function handleKPIOnly(req, res, next) {
     if (!q) return res.status(400).json({ error: "imei required" });
 
     const { imei, name } = await resolveOneImeiOrThrow(q);
-
     const energyHex = (req.query.energy || "01").toLowerCase();
-    const typeHex = (req.query.type || "").toLowerCase() || null;
     const multiHex = (req.query.multi || "").toLowerCase() || null;
 
     const baseKST = DateTime.now().setZone(TZ);
     const startOfTodayKST = baseKST.startOf('day');
+    
+    const thisMonthStr = baseKST.startOf('month').toFormat('yyyy-MM-dd');
+    const prevMonthStr = baseKST.startOf('month').minus({ months: 1 }).toFormat('yyyy-MM-dd');
     const startOfQueryUTC = startOfTodayKST.minus({ hours: 1 }).toUTC().toJSDate();
-
-    const sql = `
-      SELECT 
-        split_part(body, ' ', 4) as multi_id,
-        body,
-        "time"
+    
+    const sqlToday = `
+      SELECT split_part(body, ' ', 4) as multi_id, body, "time"
       FROM public.log_rtureceivelog
-      WHERE "rtuImei" = $1
-        AND "time" >= $2
-        AND split_part(body, ' ', 5) = '00'
-        AND left(body, 2) = '14'
+      WHERE "rtuImei" = $1 AND "time" >= $2
+        AND split_part(body, ' ', 5) = '00' AND left(body, 2) = '14'
         AND split_part(body, ' ', 2) = $3
         AND COALESCE("bodyLength", 9999) >= 12
       ORDER BY "time" ASC
     `;
 
-    const { rows } = await pool.query(sql, [imei, startOfQueryUTC, energyHex]);
+    // sqlMonthly: max_wh가 큰 순서(유효한 데이터)대로 정렬 추가
+    const sqlMonthly = `
+      SELECT day, multi_hex, max_wh 
+      FROM public.log_rtureceivelog_daily 
+      WHERE "rtuImei" = $1 
+        AND energy_hex = $2 
+        AND day::date IN ($3, $4)
+        AND max_wh IS NOT NULL AND max_wh > 0
+      ORDER BY day ASC, max_wh DESC
+    `;
+
+    const [rows, monthlyRaw] = await Promise.all([
+      pool.query(sqlToday, [imei, startOfQueryUTC, energyHex]).then(r => r.rows),
+      pool.query(sqlMonthly, [imei, energyHex, prevMonthStr, thisMonthStr]).then(r => r.rows)
+    ]);
 
     if (!rows.length) {
       return res.status(422).json({ error: "NO_DATA", message: "조회된 데이터가 없습니다." });
@@ -1103,64 +1113,84 @@ async function handleKPIOnly(req, res, next) {
 
     const unitMap = new Map();
     let latestTimestamp = null;
-
     rows.forEach(r => {
       const mId = r.multi_id.toLowerCase();
       if (multiHex && multiHex !== 'all' && mId !== multiHex) return;
-
       const p = parseFrame(r.body);
       const wh = p?.metrics?.cumulativeWh;
       const w = p?.metrics?.currentOutputW || 0;
       if (wh == null) return;
-
       if (!unitMap.has(mId)) {
         unitMap.set(mId, { startWh: wh, endWh: wh, lastW: w, time: r.time });
       } else {
         const data = unitMap.get(mId);
-        data.endWh = wh;
-        data.lastW = w;
-        data.time = r.time;
+        data.endWh = wh; data.lastW = w; data.time = r.time;
       }
+      if (!latestTimestamp || r.time > latestTimestamp) latestTimestamp = r.time;
+    });
 
-      if (!latestTimestamp || r.time > latestTimestamp) {
-        latestTimestamp = r.time;
+    // 4. 지난달 평균 출력 계산
+    let monthDiffWhSum = 0n;
+    let haveMonth = false;
+
+    const stats = monthlyRaw.map(s => ({
+      ...s,
+      dateStr: DateTime.fromJSDate(s.day).setZone(TZ).toFormat('yyyy-MM-dd')
+    }));
+
+    const mIds = [...new Set(stats.map(s => s.multi_hex))];
+    mIds.forEach(mId => {
+      // 보완: 같은 날짜에 데이터가 여러 개 있을 경우 수치가 있는 행(max_wh가 큰 것)을 선택
+      const startData = stats
+        .filter(s => s.multi_hex === mId && s.dateStr === prevMonthStr)
+        .sort((a, b) => Number(b.max_wh) - Number(a.max_wh))[0];
+        
+      const endData = stats
+        .filter(s => s.multi_hex === mId && s.dateStr === thisMonthStr)
+        .sort((a, b) => Number(b.max_wh) - Number(a.max_wh))[0];
+
+      if (startData && endData) {
+        // 수정: 오타(start_wh) 제거 및 정확한 연산
+        const diff = BigInt(endData.max_wh) - BigInt(startData.max_wh);
+        if (diff >= 0n) {
+          monthDiffWhSum += diff;
+          haveMonth = true;
+        }
       }
     });
 
-    let todayWhSum = 0n;
-    let totalNowWSum = 0;
-    let totalCumulativeWhSum = 0n;
-
-    for (const data of unitMap.values()) {
-      if (data.endWh >= data.startWh) {
-        todayWhSum += (data.endWh - data.startWh);
+    let last_month_avg_kw = null;
+    if (haveMonth) {
+      const hours = (baseKST.startOf('month').toMillis() - baseKST.startOf('month').minus({ months: 1 }).toMillis()) / 3600000;
+      if (hours > 0) {
+        last_month_avg_kw = Math.round(((Number(monthDiffWhSum) / 1000) / hours) * 100) / 100;
       }
+    }
+
+    let todayWhSum = 0n; let totalNowWSum = 0; let totalCumulativeWhSum = 0n;
+    for (const data of unitMap.values()) {
+      if (data.endWh >= data.startWh) todayWhSum += (data.endWh - data.startWh);
       totalNowWSum += Number(data.lastW);
       totalCumulativeWhSum += BigInt(data.endWh);
     }
 
     const co2Factor = CO2_FOR(energyHex);
     const total_kwh = Math.round((Number(totalCumulativeWhSum) / 1000) * 100) / 100;
-    const today_kwh = Math.round((Number(todayWhSum) / 1000.0) * 100) / 100;
 
     return res.json({
       fast: true,
-      deviceInfo: {
-        imei,
-        name,
-        energy: energyHex,
-        latestAt: latestTimestamp,
-      },
+      deviceInfo: { imei, name, energy: energyHex, latestAt: latestTimestamp },
       kpis: {
         now_kw: Math.round((totalNowWSum / 1000) * 100) / 100,
-        today_kwh: today_kwh,
-        total_kwh: total_kwh,
+        today_kwh: Math.round((Number(todayWhSum) / 1000.0) * 100) / 100,
+        total_kwh,
         co2_kg: total_kwh ? Math.round(total_kwh * co2Factor * 100) / 100 : null,
         inverter_efficiency_pct: computeInverterEfficiency(parseFrame(rows[rows.length-1].body)?.metrics || {}),
-        last_month_avg_kw: null,
+        last_month_avg_kw: last_month_avg_kw
       },
     });
   } catch (err) {
+    console.error("[handleKPIOnly Error]", err);
     next(err);
   }
 }
