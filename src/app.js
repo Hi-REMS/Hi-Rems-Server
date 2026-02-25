@@ -8,13 +8,34 @@ const path = require('path');
 const fs = require('fs');
 const swaggerUi = require('swagger-ui-express');
 const YAML = require('yamljs');
+const helmet = require('helmet');
+const xss = require('xss');
 
 const { setupEnergyCron } = require('./jobs/energyRefresh');
 const { getNormalPointsCached } = require('./jobs/normalPointCache');
 const app = express();
+
+const xssClean = (obj) => {
+  if (typeof obj === 'string') return xss(obj);
+  if (typeof obj === 'object' && obj !== null) {
+    for (let key in obj) {
+      obj[key] = xssClean(obj[key]);
+    }
+  }
+  return obj;
+};
+
+app.use(helmet());
 app.use(express.json());
 app.use(cookieParser());
 app.set('trust proxy', 1);
+
+app.use((req, res, next) => {
+  if (req.body) req.body = xssClean(req.body);
+  if (req.query) req.query = xssClean(req.query);
+  if (req.params) req.params = xssClean(req.params);
+  next();
+});
 
 const whitelist = (process.env.CORS_ORIGIN || '')
   .split(',')

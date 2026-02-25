@@ -962,7 +962,6 @@ async function handleHourly(req, res, next, defaultEnergyHex = '01') {
       ? DateTime.fromFormat(dateStr, 'yyyy-LL-dd', { zone: TZ })
       : DateTime.now().setZone(TZ);
 
-    // const startOfTodayKST = baseKST.startOf('day').toUTC().toJSDate();
     const startUtc = baseKST.minus({ hours: 1 }).startOf('hour').toUTC().toJSDate();
     const endUtc = baseKST.endOf('day').toUTC().toJSDate();
 
@@ -1091,7 +1090,6 @@ async function handleKPIOnly(req, res, next) {
       ORDER BY "time" ASC
     `;
 
-    // sqlMonthly: max_wh가 큰 순서(유효한 데이터)대로 정렬 추가
     const sqlMonthly = `
       SELECT day, multi_hex, max_wh 
       FROM public.log_rtureceivelog_daily 
@@ -1129,7 +1127,6 @@ async function handleKPIOnly(req, res, next) {
       if (!latestTimestamp || r.time > latestTimestamp) latestTimestamp = r.time;
     });
 
-    // 4. 지난달 평균 출력 계산
     let monthDiffWhSum = 0n;
     let haveMonth = false;
 
@@ -1140,7 +1137,6 @@ async function handleKPIOnly(req, res, next) {
 
     const mIds = [...new Set(stats.map(s => s.multi_hex))];
     mIds.forEach(mId => {
-      // 보완: 같은 날짜에 데이터가 여러 개 있을 경우 수치가 있는 행(max_wh가 큰 것)을 선택
       const startData = stats
         .filter(s => s.multi_hex === mId && s.dateStr === prevMonthStr)
         .sort((a, b) => Number(b.max_wh) - Number(a.max_wh))[0];
@@ -1150,7 +1146,6 @@ async function handleKPIOnly(req, res, next) {
         .sort((a, b) => Number(b.max_wh) - Number(a.max_wh))[0];
 
       if (startData && endData) {
-        // 수정: 오타(start_wh) 제거 및 정확한 연산
         const diff = BigInt(endData.max_wh) - BigInt(startData.max_wh);
         if (diff >= 0n) {
           monthDiffWhSum += diff;
