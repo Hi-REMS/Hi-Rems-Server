@@ -8,29 +8,40 @@ const {
 let memoryCache = { electric: null, thermal: null, updatedAt: null };
 
 async function refreshOnce() {
+  try {
+    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_energy_recent');
+    console.log('[energyRefresh] MView refreshed successfully with CONCURRENTLY');
+  } catch (e) {
+    console.error('[energyRefresh] MView refresh failed:', e.message);
+    await pool.query('REFRESH MATERIALIZED VIEW mv_energy_recent');
+  }
+
   const [electric, thermal] = await Promise.all([
     getElectricNationwideSummary(),
     getThermalNationwideSummary(),
   ]);
+
   memoryCache = { electric, thermal, updatedAt: new Date().toISOString() };
   
   await pool.query(
     `CREATE TABLE IF NOT EXISTS energy_nationwide_cache (
-       key text PRIMARY KEY,
-       payload jsonb NOT NULL,
-       updated_at timestamptz NOT NULL DEFAULT now()
-     )`
+        key text PRIMARY KEY,
+        payload jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`
   );
+  
   await pool.query(
     `INSERT INTO energy_nationwide_cache (key, payload, updated_at)
-     VALUES ($1,$2,now())
-     ON CONFLICT (key) DO UPDATE SET payload=$2, updated_at=now()`,
+      VALUES ($1,$2,now())
+      ON CONFLICT (key) DO UPDATE SET payload=$2, updated_at=now()`,
     ['electric', electric]
   );
+  
   await pool.query(
     `INSERT INTO energy_nationwide_cache (key, payload, updated_at)
-     VALUES ($1,$2,now())
-     ON CONFLICT (key) DO UPDATE SET payload=$2, updated_at=now()`,
+      VALUES ($1,$2,now())
+      ON CONFLICT (key) DO UPDATE SET payload=$2, updated_at=now()`,
     ['thermal', thermal]
   );
 

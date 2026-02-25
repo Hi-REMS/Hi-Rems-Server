@@ -35,7 +35,7 @@ const storage = multer.diskStorage({
 const upload = multer({
     storage,
     limits: { 
-        fileSize: 5 * 1024 * 1024
+        fileSize: 50 * 1024 * 1024
     },
     fileFilter: (req, file, cb) => {
         const filetypes = /jpeg|jpg|png|gif|webp/;
@@ -55,7 +55,7 @@ router.post('/upload', requireAuth, (req, res) => {
             if (err.code === 'LIMIT_FILE_SIZE') {
                 return res.status(400).json({ 
                     ok: false, 
-                    message: '파일 크기가 너무 큽니다. 최대 5MB까지 가능합니다.' 
+                    message: '파일 크기가 너무 큽니다. 최대 50MB까지 가능합니다.' 
                 });
             }
             return res.status(400).json({ ok: false, message: err.message });
