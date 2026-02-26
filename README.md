@@ -58,6 +58,8 @@ node scripts/seed-gs-data.js
 2. **상태**: 정상 가동 중 (Error Code 0x00)
 3. **누적 발전량**: 1,000,000 Wh (Hex `0f 42 40` 변환 값)
 
+----
+### HTTPS 전송 데이터 형태
 
 - 데이터 전송 프로토콜 명세 (Body 구조)
 
