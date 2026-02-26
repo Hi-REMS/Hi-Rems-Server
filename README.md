@@ -1,9 +1,4 @@
 # HI-REMS-SERVER
-
-### Hi-REMS (Hybrid Energy Remote Monitoring System)
-
-**Hi-REMS**는 태양광, 태양열, 지열, 풍력, 연료전지, ESS 등 이기종 신재생 에너지 설비의 데이터를 실시간으로 수집·분석하여, 최적의 에너지 효율 관리와 안정적인 설비 운영을 지원하는 통합 모니터링 솔루션입니다.
-
 ---
 
 ### 로컬 개발 환경 구축
