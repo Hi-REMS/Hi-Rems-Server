@@ -21,10 +21,13 @@ npm install
 # .env.example 파일을 복사하여 .env 파일을 생성하고 로컬 DB 접속 정보를 수정합니다.
 cp .env.example .env
 ```
-#### 4. 데이터베이스 초기화
+#### 4. 데이터베이스 초기화 및 스키마 추가
 
 ```sql
 CREATE DATABASE alliothub;
+
+# ... 필요한 테이블들 추가( 운영 환경에 맞게 추가 (members, imei_meta 등))
+
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 ```
 
