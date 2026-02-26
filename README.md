@@ -18,7 +18,7 @@ npm install
 ```
 #### 3. 환경 변수 설정
 ```bash
-# .env.example 파일을 복사하여 .env 파일을 생성하고 로컬 DB 접속 정보를 수정합니다.
+# .env.example 파일을 복사하여 .env 파일을 생성하고 로컬 DB 접속 정보를 수정
 cp .env.example .env
 ```
 #### 4. 데이터베이스 초기화 및 스키마 추가
