@@ -1,13 +1,23 @@
 const { Pool } = require('pg');
+require('dotenv').config();
 
-const useSSL = String(process.env.DB_SSL || '').toLowerCase() === 'true';
+const {
+  DB_HOST,
+  DB_PORT = '5432',
+  DB_USER,
+  DB_PASS,
+  DB_NAME,
+  DB_SSL = 'false'
+} = process.env;
+
+const useSSL = String(DB_SSL).toLowerCase() === 'true';
 
 const pool = new Pool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT || 5432),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
+  host: DB_HOST,
+  port: Number(DB_PORT),
+  user: DB_USER,
+  password: DB_PASS,
+  database: DB_NAME,
   max: 30,           
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,

@@ -3,21 +3,21 @@ require('dotenv').config();
 
 const {
   MYSQL_HOST,
-  MYSQL_PORT = '3307',
+  MYSQL_PORT,
   MYSQL_DB,
   MYSQL_USER,
   MYSQL_PASS,
-  MYSQL_SSL = 'false',
-  MYSQL_CONN_LIMIT = '10',
+  MYSQL_SSL,
+  MYSQL_CONN_LIMIT,
 } = process.env;
 
 const mysqlPool = mysql.createPool({
-  host: MYSQL_HOST || '127.0.0.1',
-  port: Number(MYSQL_PORT) || 3307,
-  user: MYSQL_USER || 'root',
-  password: MYSQL_PASS || '',
-  database: MYSQL_DB || 'rems',
-  connectionLimit: Number(MYSQL_CONN_LIMIT) || 10,
+  host: MYSQL_HOST,
+  port: Number(MYSQL_PORT),
+  user: MYSQL_USER ,
+  password: MYSQL_PASS,
+  database: MYSQL_DB,
+  connectionLimit: Number(MYSQL_CONN_LIMIT),
   waitForConnections: true,
   ssl: MYSQL_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   timezone: '+09:00',
