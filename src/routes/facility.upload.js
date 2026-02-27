@@ -4,7 +4,9 @@ const path = require('path');
 const fs = require('fs');
 const { requireAuth } = require('../middlewares/requireAuth');
 const router = express.Router();
-const uploadDir = '/var/www/html/uploads/facility';
+
+
+const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads/facility');
 
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -23,7 +25,9 @@ function getKSTTimestamp() {
 }
 
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
     filename: (req, file, cb) => {
         const ext = path.extname(file.originalname);
         const imei = (req.body.rtuImei || 'unknown').trim();
