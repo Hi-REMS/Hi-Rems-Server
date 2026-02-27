@@ -15,6 +15,11 @@ const { setupEnergyCron } = require('./jobs/energyRefresh');
 const { getNormalPointsCached } = require('./jobs/normalPointCache');
 const app = express();
 
+
+const staticUploadPath = process.env.UPLOAD_DIR 
+    ? path.resolve(process.env.UPLOAD_DIR, '..') 
+    : path.join(__dirname, '../uploads');
+
 const xssClean = (obj) => {
   if (typeof obj === 'string') return xss(obj);
   if (typeof obj === 'object' && obj !== null) {
@@ -25,6 +30,7 @@ const xssClean = (obj) => {
   return obj;
 };
 
+app.use('/uploads', express.static(staticUploadPath));
 app.use(helmet());
 app.use(express.json());
 app.use(cookieParser());
