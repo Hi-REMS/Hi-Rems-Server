@@ -1,10 +1,9 @@
-// src/db/init.pg.js
 const { pool } = require('./db.pg');
 
 const initPostgres = async () => {
   const client = await pool.connect();
   try {
-    console.log('11개 테이블 동기화 시작...');
+    console.log('PostgreSQL 테이블 및 뷰 동기화 시작...');
     
     await client.query('BEGIN');
 
@@ -93,7 +92,7 @@ const initPostgres = async () => {
         "msgType" CHARACTER VARYING(1) NOT NULL,
         "seqSendTime" TIME WITHOUT TIME ZONE NOT NULL,
         "businessId" INTEGER, "serviceId" INTEGER,
-        "opMode" CHARACTER VARYING(1) NOT NULL,
+        "opMode" CHARACTER VARYING(10) NOT NULL, -- 길이 수정: 1 -> 10
         "multiId" SMALLINT NOT NULL,
         "bodyLength" INTEGER NOT NULL,
         "bodyOptionId" SMALLINT NOT NULL,
@@ -103,20 +102,21 @@ const initPostgres = async () => {
     `);
 
     await client.query('COMMIT');
-    console.log('기본 테이블 생성 완료.');
+    console.log('기본 테이블 생성 및 설정 완료.');
 
     try {
       await client.query(`SELECT create_hypertable('public.log_rtureceivelog', 'time', if_not_exists => TRUE);`);
       console.log('하이퍼테이블 설정 완료.');
     } catch (e) {
-      console.log('하이퍼테이블 이미 존재하거나 설정 건너뜀.');
+      console.log('하이퍼테이블 설정 건너뜀 (이미 존재함).');
     }
-    const { rows: vExists } = await client.query(`
+
+    const { rows: dailyExists } = await client.query(`
       SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_name = 'log_rtureceivelog_daily'
     `);
 
-    if (vExists.length === 0) {
-      console.log('지속적 집계 뷰 생성 중...');
+    if (dailyExists.length === 0) {
+      console.log('지속적 집계 뷰(Daily) 생성 중...');
       await client.query(`
         CREATE MATERIALIZED VIEW log_rtureceivelog_daily
         WITH (timescaledb.continuous) AS
@@ -150,15 +150,71 @@ const initPostgres = async () => {
         WHERE split_part(body, ' ', 5) IN ('00', '39')
         GROUP BY day, "rtuImei", energy_hex, type_hex, multi_hex;
       `);
-      
       await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_daily SET (timescaledb.materialized_only = false);`);
-      console.log('지속적 집계 뷰 생성 완료');
+      console.log('지속적 집계 뷰(Daily) 생성 완료');
+    }
+
+    const { rows: mvExists } = await client.query(`
+      SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_energy_recent'
+    `);
+
+    if (mvExists.length === 0) {
+      console.log('최근 에너지 분석 뷰(mv_energy_recent) 생성 중...');
+      const mvQuery = `
+        CREATE MATERIALIZED VIEW public.mv_energy_recent AS
+        WITH raw0 AS (
+            SELECT log_rtureceivelog."time" AS ts,
+                   log_rtureceivelog."rtuImei" AS imei,
+                   regexp_replace(log_rtureceivelog.body, '[^0-9A-Fa-f]'::text, ''::text, 'g'::text) AS clean_hex0
+            FROM log_rtureceivelog
+            WHERE ((log_rtureceivelog.body IS NOT NULL) AND (log_rtureceivelog."rtuImei" IS NOT NULL) AND (log_rtureceivelog."time" >= (now() - '00:05:00'::interval)))
+        ), raw1 AS (
+            SELECT raw0.ts, raw0.imei,
+                   CASE WHEN ((length(raw0.clean_hex0) % 2) = 1) THEN ('0'::text || raw0.clean_hex0) ELSE raw0.clean_hex0 END AS clean_hex
+            FROM raw0 WHERE (length(raw0.clean_hex0) >= 10)
+        ), hdr AS (
+            SELECT raw1.ts, raw1.imei, decode(raw1.clean_hex, 'hex'::text) AS b,
+                   octet_length(decode(raw1.clean_hex, 'hex'::text)) AS len,
+                   get_byte(decode(raw1.clean_hex, 'hex'::text), 0) AS cmd,
+                   get_byte(decode(raw1.clean_hex, 'hex'::text), 1) AS energy,
+                   get_byte(decode(raw1.clean_hex, 'hex'::text), 2) AS type,
+                   get_byte(decode(raw1.clean_hex, 'hex'::text), 3) AS multi,
+                   get_byte(decode(raw1.clean_hex, 'hex'::text), 4) AS err, 5 AS data_off
+            FROM raw1 WHERE (SUBSTRING(raw1.clean_hex FROM 1 FOR 2) = '14'::text)
+        ), pv_single AS (
+            SELECT hdr.ts, hdr.imei, hdr.multi,
+                   (((((((((get_byte(hdr.b, (hdr.data_off + 18)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 19)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 20)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 21)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 22)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 23)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 24)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 25)))::numeric) AS cum_wh
+            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 1) AND (hdr.type = 1) AND (hdr.len >= (hdr.data_off + 26)))
+        ), pv_three AS (
+            SELECT hdr.ts, hdr.imei, hdr.multi,
+                   (((((((((get_byte(hdr.b, (hdr.data_off + 28)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 29)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 30)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 31)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 32)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 33)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 34)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 35)))::numeric) AS cum_wh
+            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 1) AND (hdr.type = 2) AND (hdr.len >= (hdr.data_off + 38)))
+        ), pv AS (
+            SELECT ts, imei, multi, cum_wh FROM pv_single UNION ALL SELECT ts, imei, multi, cum_wh FROM pv_three
+        ), th AS (
+            SELECT hdr.ts, hdr.imei, hdr.multi,
+                   ((((((((((get_byte(hdr.b, (hdr.data_off + 28)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 29)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 30)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 31)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 32)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 33)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 34)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 35)))::numeric) / 860.42065) AS cum_kwh
+            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 2) AND (hdr.len >= (hdr.data_off + 38)))
+        ), pv_dev AS (
+            SELECT imei, multi, min(cum_wh) AS min_recent, max(cum_wh) AS max_recent FROM pv GROUP BY imei, multi
+        ), th_dev AS (
+            SELECT imei, multi, min(cum_kwh) AS min_recent, max(cum_kwh) AS max_recent FROM th GROUP BY imei, multi
+        )
+        SELECT imei, multi, min_recent, max_recent FROM pv_dev
+        UNION ALL
+        SELECT imei, multi, min_recent, max_recent FROM th_dev
+        WITH NO DATA;
+      `;
+      await client.query(mvQuery);
+      await client.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
+      console.log('최근 에너지 분석 뷰(mv_energy_recent) 생성 완료');
     }
 
     console.log('PostgreSQL 전체 동기화 성공');
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (e) {}
     console.error('DB 초기화 실패:', err.message);
+    throw err;
   } finally {
     client.release();
   }
