@@ -3,17 +3,17 @@ const { pool } = require('./db.pg');
 const initPostgres = async () => {
   const client = await pool.connect();
   try {
-    console.log('PostgreSQL 테이블 및 뷰 동기화 시작 (KST 타임존 및 시간대별 발전량 로직 포함)...');
-    
+    console.log('PostgreSQL 테이블 및 뷰 동기화 시작 (TimescaleDB 최적화 및 KST 보정)...');
+
+    // 1. 기본 테이블 생성 (Transaction 사용 가능)
     await client.query('BEGIN');
 
-    // [설정] DB 및 세션 타임존을 한국 시간(KST)으로 고정
+    // [설정] DB 기본 타임존 KST 고정
     await client.query(`ALTER DATABASE ${process.env.DB_NAME || 'alliothub'} SET timezone TO 'Asia/Seoul';`);
     await client.query(`SET TIME ZONE 'Asia/Seoul';`);
 
     await client.query(`CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;`);
 
-    // 1. 모든 기본 테이블 생성 (누락 없음)
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.members (
         member_id SERIAL PRIMARY KEY,
@@ -122,9 +122,9 @@ const initPostgres = async () => {
     `);
 
     await client.query('COMMIT');
-    console.log('기본 테이블 생성 및 인덱스 설정 완료.');
+    console.log('기본 테이블 생성 완료.');
 
-    // 2. 하이퍼테이블 설정
+    // 2. 하이퍼테이블 설정 (Transaction 외부 권장)
     try {
       await client.query(`SELECT create_hypertable('public.log_rtureceivelog', 'time', if_not_exists => TRUE);`);
       await client.query(`SELECT create_hypertable('public.log_remssendlog', 'time', if_not_exists => TRUE);`);
@@ -133,162 +133,110 @@ const initPostgres = async () => {
       console.log('하이퍼테이블 설정 건너뜀 (이미 존재함).');
     }
 
-    // 3. 지속적 집계 뷰 (Daily) - KST 기준 날짜 경계 적용
-    const { rows: dailyExists } = await client.query(`
-      SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_name = 'log_rtureceivelog_daily'
+    // --- 집계 뷰 생성 전 기존 뷰 삭제 (에러 방지용) ---
+    console.log('기존 집계 뷰 초기화 중...');
+    await client.query(`DROP MATERIALIZED VIEW IF EXISTS log_rtureceivelog_daily CASCADE;`);
+    await client.query(`DROP MATERIALIZED VIEW IF EXISTS log_rtureceivelog_hourly CASCADE;`);
+
+    // 3. 지속적 집계 뷰 (Daily) - time_bucket 수정 (AT TIME ZONE 제거)
+    console.log('지속적 집계 뷰(Daily) 생성 중...');
+    await client.query(`
+      CREATE MATERIALIZED VIEW log_rtureceivelog_daily
+      WITH (timescaledb.continuous) AS
+      SELECT 
+          time_bucket('1 day', "time") AS day,
+          "rtuImei",
+          split_part(body, ' ', 2) AS energy_hex,
+          split_part(body, ' ', 3) AS type_hex,
+          split_part(body, ' ', 4) AS multi_hex,
+          max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
+              CASE
+                  WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
+                  WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
+                  WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
+                  WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
+                  WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
+                  WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
+                  ELSE 22
+              END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
+          min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
+              CASE
+                  WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
+                  WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
+                  WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
+                  WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
+                  WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
+                  WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
+                  ELSE 22
+              END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
+      FROM public.log_rtureceivelog
+      WHERE split_part(body, ' ', 5) IN ('00', '39')
+      GROUP BY day, "rtuImei", energy_hex, type_hex, multi_hex;
     `);
+    await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_daily SET (timescaledb.materialized_only = false);`);
 
-    if (dailyExists.length === 0) {
-      console.log('지속적 집계 뷰(Daily) 생성 중...');
-      await client.query(`
-        CREATE MATERIALIZED VIEW log_rtureceivelog_daily
-        WITH (timescaledb.continuous) AS
-        SELECT 
-            time_bucket('1 day', "time" AT TIME ZONE 'Asia/Seoul') AS day,
-            "rtuImei",
-            split_part(body, ' ', 2) AS energy_hex,
-            split_part(body, ' ', 3) AS type_hex,
-            split_part(body, ' ', 4) AS multi_hex,
-            max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
-                CASE
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
-                    ELSE 22
-                END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
-            min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
-                CASE
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
-                    ELSE 22
-                END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
-        FROM public.log_rtureceivelog
-        WHERE split_part(body, ' ', 5) IN ('00', '39')
-        GROUP BY day, "rtuImei", energy_hex, type_hex, multi_hex;
-      `);
-      await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_daily SET (timescaledb.materialized_only = false);`);
-      console.log('지속적 집계 뷰(Daily) 생성 완료');
-    }
-
-    // 4. 시간 단위 집계 뷰 (Hourly) 추가 - KST 기준
-    const { rows: hourlyExists } = await client.query(`
-      SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_name = 'log_rtureceivelog_hourly'
+    // 4. 지속적 집계 뷰 (Hourly) - time_bucket 수정 (AT TIME ZONE 제거)
+    console.log('지속적 집계 뷰(Hourly) 생성 중...');
+    await client.query(`
+      CREATE MATERIALIZED VIEW log_rtureceivelog_hourly
+      WITH (timescaledb.continuous) AS
+      SELECT 
+          time_bucket('1 hour', "time") AS hour,
+          "rtuImei",
+          split_part(body, ' ', 2) AS energy_hex,
+          split_part(body, ' ', 3) AS type_hex,
+          split_part(body, ' ', 4) AS multi_hex,
+          max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
+          min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
+      FROM public.log_rtureceivelog
+      WHERE split_part(body, ' ', 5) IN ('00', '39')
+      GROUP BY hour, "rtuImei", energy_hex, type_hex, multi_hex;
     `);
+    await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_hourly SET (timescaledb.materialized_only = false);`);
 
-    if (hourlyExists.length === 0) {
-      console.log('지속적 집계 뷰(Hourly) 생성 중...');
-      await client.query(`
-        CREATE MATERIALIZED VIEW log_rtureceivelog_hourly
-        WITH (timescaledb.continuous) AS
-        SELECT 
-            time_bucket('1 hour', "time" AT TIME ZONE 'Asia/Seoul') AS hour,
-            "rtuImei",
-            split_part(body, ' ', 2) AS energy_hex,
-            split_part(body, ' ', 3) AS type_hex,
-            split_part(body, ' ', 4) AS multi_hex,
-            max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
-            min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
-        FROM public.log_rtureceivelog
-        WHERE split_part(body, ' ', 5) IN ('00', '39')
-        GROUP BY hour, "rtuImei", energy_hex, type_hex, multi_hex;
-      `);
-      await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_hourly SET (timescaledb.materialized_only = false);`);
-      console.log('지속적 집계 뷰(Hourly) 생성 완료');
-    }
-
-    // 5. 호환성 뷰 (energy_daily, energy_hourly)
-    console.log('호환성 일반 뷰 동기화 중...');
+    // 5. 호환성 일반 뷰 (여기서 KST로 변환하여 출력)
+    console.log('호환성 일반 뷰 생성 중...');
     await client.query(`
       CREATE OR REPLACE VIEW public.energy_daily AS 
       SELECT 
-          to_char(day, 'YYYYMMDD') AS ymd, 
+          to_char(day AT TIME ZONE 'Asia/Seoul', 'YYYYMMDD') AS ymd, 
           "rtuImei" AS imei, 
           (COALESCE(max_wh, 0) - COALESCE(min_wh, 0)) / 1000.0 AS kwh 
       FROM public.log_rtureceivelog_daily;
 
       CREATE OR REPLACE VIEW public.energy_hourly AS 
       SELECT 
-          hour AS ts, 
+          hour AT TIME ZONE 'Asia/Seoul' AS ts, 
           "rtuImei" AS imei, 
           (COALESCE(max_wh, 0) - COALESCE(min_wh, 0)) / 1000.0 AS kwh 
       FROM public.log_rtureceivelog_hourly;
     `);
-    console.log('호환성 일반 뷰 생성 완료');
 
-    // 6. 집계 데이터 강제 동기화 (KST 기준으로 2025년부터 현재까지)
-    console.log('집계 데이터 강제 동기화 중 (KST 2025-01-01 ~ 현재)...');
+    // 6. 집계 데이터 강제 동기화
+    console.log('집계 데이터 동기화 진행 (2025-01-01 ~ 현재)...');
     await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_daily', '2025-01-01', NOW());`);
     await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_hourly', '2025-01-01', NOW());`);
 
     // 7. 실시간 분석 뷰 (Materialized View)
-    const { rows: mvExists } = await client.query(`
-      SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_energy_recent'
-    `);
-
-    if (mvExists.length === 0) {
-      console.log('최근 에너지 분석 뷰(mv_energy_recent) 생성 중...');
-      const mvQuery = `
-        CREATE MATERIALIZED VIEW public.mv_energy_recent AS
-        WITH raw0 AS (
-            SELECT log_rtureceivelog."time" AS ts,
-                   log_rtureceivelog."rtuImei" AS imei,
-                   regexp_replace(log_rtureceivelog.body, '[^0-9A-Fa-f]'::text, ''::text, 'g'::text) AS clean_hex0
-            FROM log_rtureceivelog
-            WHERE ((log_rtureceivelog.body IS NOT NULL) AND (log_rtureceivelog."rtuImei" IS NOT NULL) AND (log_rtureceivelog."time" >= (now() - '00:05:00'::interval)))
-        ), raw1 AS (
-            SELECT raw0.ts, raw0.imei,
-                   CASE WHEN ((length(raw0.clean_hex0) % 2) = 1) THEN ('0'::text || raw0.clean_hex0) ELSE raw0.clean_hex0 END AS clean_hex
-            FROM raw0 WHERE (length(raw0.clean_hex0) >= 10)
-        ), hdr AS (
-            SELECT raw1.ts, raw1.imei, decode(raw1.clean_hex, 'hex'::text) AS b,
-                   octet_length(decode(raw1.clean_hex, 'hex'::text)) AS len,
-                   get_byte(decode(raw1.clean_hex, 'hex'::text), 0) AS cmd,
-                   get_byte(decode(raw1.clean_hex, 'hex'::text), 1) AS energy,
-                   get_byte(decode(raw1.clean_hex, 'hex'::text), 2) AS type,
-                   get_byte(decode(raw1.clean_hex, 'hex'::text), 3) AS multi,
-                   get_byte(decode(raw1.clean_hex, 'hex'::text), 4) AS err, 5 AS data_off
-            FROM raw1 WHERE (SUBSTRING(raw1.clean_hex FROM 1 FOR 2) = '14'::text)
-        ), pv_single AS (
-            SELECT hdr.ts, hdr.imei, hdr.multi,
-                   (((((((((get_byte(hdr.b, (hdr.data_off + 18)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 19)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 20)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 21)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 22)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 23)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 24)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 25)))::numeric) AS cum_wh
-            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 1) AND (hdr.type = 1) AND (hdr.len >= (hdr.data_off + 26)))
-        ), pv_three AS (
-            SELECT hdr.ts, hdr.imei, hdr.multi,
-                   (((((((((get_byte(hdr.b, (hdr.data_off + 28)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 29)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 30)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 31)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 32)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 33)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 34)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 35)))::numeric) AS cum_wh
-            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 1) AND (hdr.type = 2) AND (hdr.len >= (hdr.data_off + 38)))
-        ), pv AS (
-            SELECT ts, imei, multi, cum_wh FROM pv_single UNION ALL SELECT ts, imei, multi, cum_wh FROM pv_three
-        ), th AS (
-            SELECT hdr.ts, hdr.imei, hdr.multi,
-                   ((((((((((get_byte(hdr.b, (hdr.data_off + 28)))::numeric * ('72057594037927936'::bigint)::numeric) + ((get_byte(hdr.b, (hdr.data_off + 29)))::numeric * ('281474976710656'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 30)))::numeric * ('1099511627776'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 31)))::numeric * ('4294967296'::bigint)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 32)))::numeric * (16777216)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 33)))::numeric * (65536)::numeric)) + ((get_byte(hdr.b, (hdr.data_off + 34)))::numeric * (256)::numeric)) + (get_byte(hdr.b, (hdr.data_off + 35)))::numeric) / 860.42065) AS cum_kwh
-            FROM hdr WHERE ((hdr.err = 0) AND (hdr.energy = 2) AND (hdr.len >= (hdr.data_off + 38)))
-        ), pv_dev AS (
-            SELECT imei, multi, min(cum_wh) AS min_recent, max(cum_wh) AS max_recent FROM pv GROUP BY imei, multi
-        ), th_dev AS (
-            SELECT imei, multi, min(cum_kwh) AS min_recent, max(cum_kwh) AS max_recent FROM th GROUP BY imei, multi
-        )
-        SELECT imei, multi, min_recent, max_recent FROM pv_dev
-        UNION ALL
-        SELECT imei, multi, min_recent, max_recent FROM th_dev
-        WITH NO DATA;
-      `;
-      await client.query(mvQuery);
-    }
-    
-    // 분석 뷰 무조건 리프레시
+    console.log('분석용 뷰(mv_energy_recent) 동기화 중...');
+    await client.query(`DROP MATERIALIZED VIEW IF EXISTS public.mv_energy_recent;`);
+    const mvQuery = `
+      CREATE MATERIALIZED VIEW public.mv_energy_recent AS
+      SELECT 
+          "rtuImei" AS imei,
+          split_part(body, ' ', 4) AS multi_hex,
+          MAX(time) AS latest_ts,
+          MAX(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS latest_wh
+      FROM public.log_rtureceivelog
+      WHERE time >= (NOW() - INTERVAL '1 day')
+      GROUP BY imei, multi_hex;
+    `;
+    await client.query(mvQuery);
     await client.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
 
-    console.log('PostgreSQL 전체 동기화 성공 (KST 적용 및 시간대별 로직 완료)');
+    console.log('PostgreSQL 전체 동기화 성공 (KST 적용 및 시간대 에러 해결 완료)');
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (e) {}
-    console.error('DB 초기화 실패:', err.message);
+    console.error('DB 초기화 실패:', err.stack);
     throw err;
   } finally {
     client.release();
