@@ -9,6 +9,7 @@ const initPostgres = async () => {
 
     await client.query(`CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;`);
 
+    // 1. 기본 테이블 생성
     await client.query(`
       CREATE TABLE IF NOT EXISTS public.members (
         member_id SERIAL PRIMARY KEY,
@@ -119,6 +120,7 @@ const initPostgres = async () => {
     await client.query('COMMIT');
     console.log('기본 테이블 생성 및 설정 완료.');
 
+    // 2. 하이퍼테이블 설정
     try {
       await client.query(`SELECT create_hypertable('public.log_rtureceivelog', 'time', if_not_exists => TRUE);`);
       await client.query(`SELECT create_hypertable('public.log_remssendlog', 'time', if_not_exists => TRUE);`);
@@ -127,6 +129,7 @@ const initPostgres = async () => {
       console.log('하이퍼테이블 설정 건너뜀 (이미 존재함).');
     }
 
+    // 3. 일일 집계 뷰 (Daily)
     const { rows: dailyExists } = await client.query(`
       SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_name = 'log_rtureceivelog_daily'
     `);
@@ -142,26 +145,8 @@ const initPostgres = async () => {
             split_part(body, ' ', 2) AS energy_hex,
             split_part(body, ' ', 3) AS type_hex,
             split_part(body, ' ', 4) AS multi_hex,
-            max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
-                CASE
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
-                    ELSE 22
-                END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
-            min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'),
-                CASE
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '01' THEN 22
-                    WHEN split_part(body, ' ', 2) = '01' AND split_part(body, ' ', 3) = '02' THEN 34
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '01' THEN 18
-                    WHEN split_part(body, ' ', 2) = '02' AND split_part(body, ' ', 3) = '02' THEN 14
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '01' THEN 16
-                    WHEN split_part(body, ' ', 2) = '03' AND split_part(body, ' ', 3) = '02' THEN 14
-                    ELSE 22
-                END, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
+            max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
+            min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
         FROM public.log_rtureceivelog
         WHERE split_part(body, ' ', 5) IN ('00', '39')
         GROUP BY day, "rtuImei", energy_hex, type_hex, multi_hex;
@@ -170,7 +155,34 @@ const initPostgres = async () => {
       console.log('지속적 집계 뷰(Daily) 생성 완료');
     }
 
-    console.log('호환성 일반 뷰(energy_daily, energy_hourly) 동기화 중...');
+    // 4. [수정 포인트] 시간 단위 집계 뷰 (Hourly) 추가
+    const { rows: hourlyExists } = await client.query(`
+      SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_name = 'log_rtureceivelog_hourly'
+    `);
+
+    if (hourlyExists.length === 0) {
+      console.log('지속적 집계 뷰(Hourly) 생성 중...');
+      await client.query(`
+        CREATE MATERIALIZED VIEW log_rtureceivelog_hourly
+        WITH (timescaledb.continuous) AS
+        SELECT 
+            time_bucket('1 hour', "time") AS hour,
+            "rtuImei",
+            split_part(body, ' ', 2) AS energy_hex,
+            split_part(body, ' ', 3) AS type_hex,
+            split_part(body, ' ', 4) AS multi_hex,
+            max(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS max_wh,
+            min(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS min_wh
+        FROM public.log_rtureceivelog
+        WHERE split_part(body, ' ', 5) IN ('00', '39')
+        GROUP BY hour, "rtuImei", energy_hex, type_hex, multi_hex;
+      `);
+      await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_hourly SET (timescaledb.materialized_only = false);`);
+      console.log('지속적 집계 뷰(Hourly) 생성 완료');
+    }
+
+    // 5. 호환성 뷰 (energy_daily, energy_hourly)
+    console.log('호환성 일반 뷰 동기화 중...');
     await client.query(`
       CREATE OR REPLACE VIEW public.energy_daily AS 
       SELECT 
@@ -179,15 +191,22 @@ const initPostgres = async () => {
           (COALESCE(max_wh, 0) - COALESCE(min_wh, 0)) / 1000.0 AS kwh 
       FROM public.log_rtureceivelog_daily;
 
+      -- [수정] 이제 energy_hourly는 시간 단위 집계 뷰를 직접 참조합니다.
       CREATE OR REPLACE VIEW public.energy_hourly AS 
       SELECT 
-          day AS ts, 
+          hour AS ts, 
           "rtuImei" AS imei, 
           (COALESCE(max_wh, 0) - COALESCE(min_wh, 0)) / 1000.0 AS kwh 
-      FROM public.log_rtureceivelog_daily;
+      FROM public.log_rtureceivelog_hourly;
     `);
     console.log('호환성 일반 뷰 생성 완료');
 
+    // 6. [핵심] 더미 데이터 입력 후 즉시 반영을 위한 강제 동기화
+    console.log('집계 데이터 강제 동기화 중 (2025~현재)...');
+    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_daily', '2025-01-01', NOW());`);
+    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_hourly', '2025-01-01', NOW());`);
+
+    // 7. 최근 에너지 분석 뷰 (Materialized View)
     const { rows: mvExists } = await client.query(`
       SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_energy_recent'
     `);
@@ -240,9 +259,10 @@ const initPostgres = async () => {
         WITH NO DATA;
       `;
       await client.query(mvQuery);
-      await client.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
-      console.log('최근 에너지 분석 뷰(mv_energy_recent) 생성 완료');
     }
+    
+    // 분석 뷰 무조건 리프레시
+    await client.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
 
     console.log('PostgreSQL 전체 동기화 성공');
   } catch (err) {
