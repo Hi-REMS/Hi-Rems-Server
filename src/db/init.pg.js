@@ -3,7 +3,7 @@ const { pool } = require('./db.pg');
 const initPostgres = async () => {
   const client = await pool.connect();
   try {
-    console.log('PostgreSQL 테이블 및 뷰 동기화 시작...');
+    console.log('PostgreSQL 테이블 및 뷰 동기화 시작');
     
     await client.query('BEGIN');
 
