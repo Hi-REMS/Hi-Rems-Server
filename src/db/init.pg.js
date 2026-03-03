@@ -3,7 +3,7 @@ const { pool } = require('./db.pg');
 const initPostgres = async () => {
   const client = await pool.connect();
   try {
-    console.log('PostgreSQL 테이블 및 뷰 동기화 시작');
+    console.log('PostgreSQL 테이블 및 뷰 동기화 시작...');
     
     await client.query('BEGIN');
 
@@ -166,16 +166,8 @@ const initPostgres = async () => {
         WHERE split_part(body, ' ', 5) IN ('00', '39')
         GROUP BY day, "rtuImei", energy_hex, type_hex, multi_hex;
       `);
-      
-      await client.query(`
-        SELECT add_continuous_aggregate_policy('log_rtureceivelog_daily',
-          start_offset => INTERVAL '3 days',
-          end_offset => INTERVAL '1 hour',
-          schedule_interval => INTERVAL '1 hour');
-      `);
-
       await client.query(`ALTER MATERIALIZED VIEW log_rtureceivelog_daily SET (timescaledb.materialized_only = false);`);
-      console.log('지속적 집계 뷰(Daily) 및 갱신 정책 생성 완료');
+      console.log('지속적 집계 뷰(Daily) 생성 완료');
     }
 
     console.log('호환성 일반 뷰(energy_daily, energy_hourly) 동기화 중...');
