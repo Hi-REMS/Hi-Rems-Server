@@ -23,7 +23,7 @@ const readCsv = (fileName) => {
 };
 
 async function seedData() {
-  console.log("GS 인증 데이터 시딩을 시작합니다...");
+  console.log("데이터 시딩을 시작");
   
   try {
     const userRows = await readCsv('user_setup.csv');
@@ -32,7 +32,7 @@ async function seedData() {
 
     await pool.query(`DELETE FROM public.log_rtureceivelog WHERE "rtuImei" LIKE '11-22-33%';`);
     await pool.query(`DELETE FROM public.log_remssendlog WHERE "rtuImei" LIKE '11-22-33%';`);
-    console.log("🧹 기존 PostgreSQL 테스트 데이터 삭제 완료");
+    console.log("기존 PostgreSQL 테스트 데이터 삭제 완료");
 
     for (const row of userRows) {
       try {
@@ -67,7 +67,7 @@ async function seedData() {
           [row.cid, 'SEED_AUTH_KEY', row.worker, 0, row.address, 1]
         );
 
-        console.log(`✔ 처리 완료: IMEI(${row.imei}) -> CID(${row.cid})`);
+        console.log(`처리 완료: IMEI(${row.imei}) -> CID(${row.cid})`);
 
       } catch (e) {
         console.error(`사용자(${row.userId}) 또는 IMEI(${row.imei}) 처리 중 에러:`, e.message);
@@ -108,7 +108,7 @@ async function seedData() {
       console.error("통계 갱신 실패 (TimescaleDB):", e.message);
     }
 
-    console.log("모든 시딩 작업이 성공적으로 완료되었습니다.");
+    console.log("모든 시딩 작업이 성공적으로 완료");
 
   } catch (err) {
     console.error("작업 중 오류 발생:");
