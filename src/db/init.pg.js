@@ -214,24 +214,56 @@ const initPostgres = async () => {
 
     // 6. 집계 데이터 강제 동기화
     console.log('집계 데이터 동기화 진행 (2025-01-01 ~ 현재)...');
-    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_daily', '2025-01-01', NOW());`);
-    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_hourly', '2025-01-01', NOW());`);
+    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_daily', '2025-01-01', (NOW() + interval '1 day')::timestamp);`);
+    await client.query(`CALL refresh_continuous_aggregate('log_rtureceivelog_hourly', '2025-01-01', (NOW() + interval '1 day')::timestamp);`);
 
-    // 7. 실시간 분석 뷰 (Materialized View)
-    console.log('분석용 뷰(mv_energy_recent) 동기화 중...');
-    await client.query(`DROP MATERIALIZED VIEW IF EXISTS public.mv_energy_recent;`);
+    // 7. 실시간 분석 뷰
+    console.log('분석용 뷰(mv_energy_recent) 생성 및 동기화 중...');
+    await client.query(`DROP MATERIALIZED VIEW IF EXISTS public.mv_energy_recent CASCADE;`);
+    
     const mvQuery = `
       CREATE MATERIALIZED VIEW public.mv_energy_recent AS
+      WITH latest_logs AS (
+          SELECT 
+              "rtuImei" AS imei,
+              split_part(body, ' ', 4) AS multi_hex,
+              split_part(body, ' ', 2) AS energy_hex,
+              MAX(time) AS latest_ts
+          FROM public.log_rtureceivelog
+          GROUP BY "rtuImei", split_part(body, ' ', 4), split_part(body, ' ', 2)
+      ),
+      daily_bounds AS (
+          SELECT 
+              "rtuImei" AS imei,
+              split_part(body, ' ', 4) AS multi_hex,
+              MIN(time) AS min_ts,
+              MAX(time) AS max_ts
+          FROM public.log_rtureceivelog
+          WHERE time >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') AT TIME ZONE 'Asia/Seoul'
+          GROUP BY "rtuImei", split_part(body, ' ', 4)
+      )
       SELECT 
-          "rtuImei" AS imei,
-          split_part(body, ' ', 4) AS multi_hex,
-          MAX(time) AS latest_ts,
-          MAX(CASE WHEN split_part(body, ' ', 5) = '00' THEN (('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint) ELSE NULL END) AS latest_wh
-      FROM public.log_rtureceivelog
-      WHERE time >= (NOW() - INTERVAL '1 day')
-      GROUP BY imei, multi_hex;
+          l.imei,
+          l.multi_hex,
+          l.latest_ts,
+          -- summary.js에서 필터링 조건으로 사용하는 'kind' 컬럼
+          CASE WHEN l.energy_hex = '01' THEN 'electric' ELSE 'thermal' END AS kind,
+          -- 금일 실적 계산용 (Max - Min)
+          COALESCE((SELECT ('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint 
+           FROM public.log_rtureceivelog 
+           WHERE "rtuImei" = l.imei AND time = d.max_ts LIMIT 1), 0) AS max_recent,
+          COALESCE((SELECT ('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint 
+           FROM public.log_rtureceivelog 
+           WHERE "rtuImei" = l.imei AND time = d.min_ts LIMIT 1), 0) AS min_recent,
+          -- 전체 누적용
+          COALESCE((SELECT ('x' || encode(substring(decode(replace(body, ' ', ''), 'hex'), 22, 8), 'hex'))::bit(64)::bigint 
+           FROM public.log_rtureceivelog 
+           WHERE "rtuImei" = l.imei AND time = l.latest_ts LIMIT 1), 0) AS latest_wh
+      FROM latest_logs l
+      LEFT JOIN daily_bounds d ON l.imei = d.imei AND l.multi_hex = d.multi_hex;
     `;
     await client.query(mvQuery);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_mv_energy_recent_imei ON public.mv_energy_recent(imei);`);
     await client.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
 
     console.log('PostgreSQL 전체 동기화 성공 (KST 적용 및 시간대 에러 해결 완료)');

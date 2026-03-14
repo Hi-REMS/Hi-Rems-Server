@@ -101,14 +101,21 @@ async function seedData() {
       );
     }
 
-    try {
-      await pool.query(`CALL refresh_continuous_aggregate('public.log_rtureceivelog_daily', '2026-01-31', '2026-02-28')`);
+try {
+      await pool.query(`CALL refresh_continuous_aggregate('public.log_rtureceivelog_daily', '2026-01-31', '2026-03-17')`);
       console.log("통계 데이터(Daily) 동기화 완료");
+
+      await pool.query(`REFRESH MATERIALIZED VIEW public.mv_energy_recent;`);
+      console.log("실시간 분석 뷰(mv_energy_recent) 갱신 완료");
+
+      await pool.query(`DELETE FROM public.energy_nationwide_cache;`);
+      console.log("기존 통계 캐시(energy_nationwide_cache) 삭제 완료");
+
     } catch (e) {
-      console.error("통계 갱신 실패 (TimescaleDB):", e.message);
+      console.error("통계/뷰/캐시 갱신 실패:", e.message);
     }
 
-    console.log("모든 시딩 작업이 성공적으로 완료");
+    console.log("✨ 모든 시딩 작업 및 데이터 동기화가 성공적으로 완료되었습니다.");
 
   } catch (err) {
     console.error("작업 중 오류 발생:");
